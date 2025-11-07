@@ -1,7 +1,7 @@
 # Nim Elixir Backend (JSON AST prototype)
 
 import
-  ast, modulegraphs, options, msgs, idents, lineinfos, pathutils
+  ast, modulegraphs, options, msgs, idents, lineinfos
 
 import pipelineutils
 
