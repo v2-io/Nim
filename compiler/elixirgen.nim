@@ -1,15 +1,17 @@
-#
-# Nim Elixir Backend (minimal prototype)
+# Nim Elixir Backend (JSON AST prototype)
 
 import
   ast, modulegraphs, options, msgs, idents, lineinfos
 
 import pipelineutils
 
-import std/[strutils, sequtils, os]
+import std/[strutils, sequtils, os, json]
 
 when defined(nimPreviewSlimSystem):
   import std/syncio
+
+const
+  artifactVersion = 1
 
 type
   TElixirGen = object of PPassContext
@@ -18,12 +20,55 @@ type
     config: ConfigRef
     moduleName: string
     elixirModuleName: string
-    lines: seq[string]
+    sourcePath: string
+    forms: seq[JsonNode]
 
   BModule = ref TElixirGen
 
-proc indent(level: int): string =
-  result = repeat("  ", level)
+# ---------------------------------------------------------------------------
+# JSON helpers
+
+proc jArray(nodes: seq[JsonNode]): JsonNode =
+  result = newJArray()
+  for node in nodes:
+    result.add(node)
+
+proc addAll(dest: var seq[JsonNode]; nodes: seq[JsonNode]) =
+  for node in nodes:
+    dest.add(node)
+
+proc makeTuple(elems: seq[JsonNode]): JsonNode =
+  result = newJObject()
+  result["$tuple"] = jArray(elems)
+
+template elixirTuple(args: varargs[JsonNode]): JsonNode =
+  makeTuple(@args)
+
+proc keyword(pairs: seq[(string, JsonNode)]): JsonNode =
+  var arr = newJArray()
+  for (key, value) in pairs:
+    var pairObj = newJObject()
+    pairObj["key"] = %* key
+    pairObj["value"] = value
+    arr.add(pairObj)
+  result = newJObject()
+  result["$keyword"] = arr
+
+proc emptyKeyword(): JsonNode =
+  keyword(@[])
+
+proc atom(name: string): JsonNode =
+  result = newJObject()
+  result["$atom"] = %* name
+
+proc list(nodes: seq[JsonNode]): JsonNode = jArray(nodes)
+
+proc makeBlock(stmts: seq[JsonNode]): JsonNode =
+  let body = if stmts.len > 0: stmts else: @[newJNull()]
+  elixirTuple(atom("__block__"), emptyKeyword(), list(body))
+
+# ---------------------------------------------------------------------------
+# Naming helpers
 
 proc toElixirModuleName(name: string): string =
   result = ""
@@ -42,23 +87,47 @@ proc toElixirModuleName(name: string): string =
   elif not result[0].isUpperAscii:
     result[0] = result[0].toUpperAscii
 
-proc mapTypeName(typeName: string): string =
-  case typeName
-  of "int", "int32", "int64", "int8", "int16", "Natural": "integer()"
-  of "float", "float32", "float64": "float()"
-  of "bool": "boolean()"
-  of "string": "String.t()"
-  else: "any()"
+proc aliasSegments(name: string): seq[string] =
+  if name.contains('.'):
+    result = name.split('.')
+  else:
+    result = @[name]
 
-proc mapTypeSym(sym: PSym): string =
-  if sym == nil: return "any()"
-  mapTypeName(sym.name.s)
+# ---------------------------------------------------------------------------
+# Metadata helpers
 
-proc escapeElixirString(s: string): string =
-  result = s
-  result = result.replace("\\", "\\\\")
-  result = result.replace("\"", "\\\"")
-  result = result.replace("\n", "\\n")
+proc metaFromInfo(m: BModule; info: TLineInfo): JsonNode =
+  var pairs: seq[(string, JsonNode)] = @[]
+  if info.line.int > 0:
+    pairs.add(("line", %* info.line.int))
+  if info.col.int > 0:
+    pairs.add(("column", %* info.col.int))
+  let filePath = toFullPath(m.config, info)
+  let fileValue = if filePath.len > 0: filePath else: m.sourcePath
+  if fileValue.len > 0:
+    pairs.add(("file", %* fileValue))
+  keyword(pairs)
+
+proc metaFromNode(m: BModule; n: PNode): JsonNode =
+  if n.isNil:
+    emptyKeyword()
+  else:
+    metaFromInfo(m, n.info)
+
+# ---------------------------------------------------------------------------
+# AST constructors
+
+proc varNode(name: string): JsonNode =
+  elixirTuple(atom(name), emptyKeyword(), atom("Elixir"))
+
+proc callNode(m: BModule; name: string; args: seq[JsonNode]; origin: PNode): JsonNode =
+  elixirTuple(atom(name), metaFromNode(m, origin), list(args))
+
+proc opNode(m: BModule; op: string; args: seq[JsonNode]; origin: PNode): JsonNode =
+  elixirTuple(atom(op), metaFromNode(m, origin), list(args))
+
+# ---------------------------------------------------------------------------
+# Expression translation
 
 proc mapOperator(name: string): string =
   case name
@@ -66,184 +135,204 @@ proc mapOperator(name: string): string =
   of "&": "<>"
   else: name
 
-proc addLine(m: BModule, line: string) =
-  m.lines.add(line)
+proc translateExpr(m: BModule; n: PNode): JsonNode
+proc translateStmt(m: BModule; node: PNode): seq[JsonNode]
 
-proc addLines(target: var seq[string]; lines: seq[string]) =
-  for line in lines:
-    target.add(line)
+proc translateIfExpr(m: BModule; node: PNode): JsonNode =
+  if node.len == 0:
+    return %* "# unsupported empty if"
 
-proc translateExpr(m: BModule; n: PNode): string
+  let firstBranch = node[0]
+  if firstBranch.kind != nkElifBranch or firstBranch.len < 2:
+    return %* "# unsupported if structure"
 
-proc translateCall(m: BModule; n: PNode): string =
-  if n.len == 0: return "/* unsupported call */"
-  let callee = translateExpr(m, n[0])
-  var args: seq[string] = @[]
+  let condition = translateExpr(m, firstBranch[0])
+  var thenStmts: seq[JsonNode] = @[]
+  for i in 1 ..< firstBranch.len:
+    thenStmts.addAll(translateStmt(m, firstBranch[i]))
+
+  var elseStmts: seq[JsonNode] = @[]
+  for branch in node:
+    if branch.kind == nkElse:
+      for child in branch:
+        elseStmts.addAll(translateStmt(m, child))
+
+  var clauses: seq[(string, JsonNode)] = @[("do", makeBlock(thenStmts))]
+  if elseStmts.len > 0:
+    clauses.add(("else", makeBlock(elseStmts)))
+
+  elixirTuple(atom("if"), metaFromNode(m, node), list(@[condition, keyword(clauses)]))
+
+proc translateCall(m: BModule; n: PNode): JsonNode =
+  if n.len == 0 or n[0].kind != nkSym or n[0].sym.isNil:
+    return %* "# unsupported call"
+
+  let name = n[0].sym.name.s
+  var args: seq[JsonNode] = @[]
   for i in 1 ..< n.len:
     args.add(translateExpr(m, n[i]))
-  result = callee & "(" & args.join(", ") & ")"
+  callNode(m, name, args, n)
 
-proc translateInfix(m: BModule; n: PNode): string =
-  if n.len < 3: return "/* unsupported infix */"
-  let opSym = n[0]
+proc translateInfix(m: BModule; n: PNode): JsonNode =
+  if n.len < 3:
+    return %* "# unsupported infix"
+
   let left = translateExpr(m, n[1])
   let right = translateExpr(m, n[2])
-  var opName = ""
-  if opSym.kind == nkSym:
-    opName = mapOperator(opSym.sym.name.s)
+  var opName = "+"
+  if n[0].kind == nkSym and not n[0].sym.isNil:
+    opName = mapOperator(n[0].sym.name.s)
   else:
-    opName = "/*op*/"
-  result = "(" & left & " " & opName & " " & right & ")"
+    opName = "+"
+  opNode(m, opName, @[left, right], n)
 
-proc translateExpr(m: BModule; n: PNode): string =
+proc translateExpr(m: BModule; n: PNode): JsonNode =
+  if n.isNil:
+    return newJNull()
+
   case n.kind
   of nkSym:
-    let sym = n.sym
-    if sym.isNil:
-      result = "/*sym*/"
+    if n.sym.isNil:
+      %* "# sym"
     else:
-      result = sym.name.s
+      let name = n.sym.name.s
+      if name == "true":
+        %* true
+      elif name == "false":
+        %* false
+      else:
+        varNode(name)
   of nkIntLit..nkInt64Lit:
-    result = $n.intVal
+    %* n.intVal
   of nkUIntLit..nkUInt64Lit:
-    result = $n.intVal
+    %* n.intVal
   of nkFloatLit..nkFloat128Lit:
-    result = repr(n.floatVal)
+    %* n.floatVal
   of nkStrLit, nkTripleStrLit:
-    result = "\"" & escapeElixirString(n.strVal) & "\""
+    %* n.strVal
+  of nkCharLit:
+    var s = newString(1)
+    s[0] = char(n.intVal.int)
+    %* s
+  of nkNilLit:
+    newJNull()
   of nkInfix:
-    result = translateInfix(m, n)
+    translateInfix(m, n)
   of nkCall:
-    result = translateCall(m, n)
+    translateCall(m, n)
+  of nkIfExpr, nkIfStmt:
+    translateIfExpr(m, n)
   of nkPar, nkExprEqExpr, nkHiddenAddr, nkHiddenDeref:
-    if n.len > 0:
-      result = translateExpr(m, n[0])
-    else:
-      result = "/*unsupported*/"
+    if n.len > 0: translateExpr(m, n[0]) else: %* "# empty"
   else:
-    result = "/* " & $n.kind & " */"
+    %* ("# unsupported " & $n.kind)
 
-proc translateAssignment(m: BModule; stmt: PNode; indentLevel: int): seq[string] =
+# ---------------------------------------------------------------------------
+# Statement translation
+
+proc translateAssignment(m: BModule; stmt: PNode): seq[JsonNode] =
   result = @[]
-  if stmt.kind != nkAsgn or stmt.len < 2:
-    result.add(indent(indentLevel) & "# unsupported assignment: " & $stmt.kind)
+  if stmt.len < 2:
+    result.add(%* ("# unsupported assignment: " & $stmt.kind))
     return
 
   let target = stmt[0]
   let expr = stmt[1]
-  if target.kind == nkSym and target.sym.name.s == "result":
-    result.add(indent(indentLevel) & translateExpr(m, expr))
+  if target.kind == nkSym and not target.sym.isNil and target.sym.name.s == "result":
+    result.add(translateExpr(m, expr))
   else:
     let lhs = translateExpr(m, target)
     let rhs = translateExpr(m, expr)
-    result.add(indent(indentLevel) & lhs & " = " & rhs)
+    result.add(opNode(m, "=", @[lhs, rhs], stmt))
 
-proc translateStmt(m: BModule; node: PNode; indentLevel: int): seq[string]
-
-proc translateIf(m: BModule; node: PNode; indentLevel: int): seq[string] =
-  result = @[]
-  if node.len == 0:
-    return @[indent(indentLevel) & "# unsupported empty if"]
-
-  let firstBranch = node[0]
-  if firstBranch.kind != nkElifBranch or firstBranch.len < 2:
-    return @[indent(indentLevel) & "# unsupported if structure"]
-
-  let condition = translateExpr(m, firstBranch[0])
-  result.add(indent(indentLevel) & "if " & condition & " do")
-
-  for i in 1 ..< firstBranch.len:
-    result.addLines(translateStmt(m, firstBranch[i], indentLevel + 1))
-
-  var elseNode: PNode = nil
-  for branch in node:
-    if branch.kind == nkElse:
-      elseNode = branch
-      break
-  if elseNode != nil:
-    result.add(indent(indentLevel) & "else")
-    for child in elseNode:
-      result.addLines(translateStmt(m, child, indentLevel + 1))
-
-  result.add(indent(indentLevel) & "end")
-
-proc translateStmt(m: BModule; node: PNode; indentLevel: int): seq[string] =
+proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
   result = @[]
   case node.kind
   of nkStmtList:
     for child in node:
-      result.addLines(translateStmt(m, child, indentLevel))
+      result.addAll(translateStmt(m, child))
   of nkAsgn:
-    result.addLines(translateAssignment(m, node, indentLevel))
+    result.addAll(translateAssignment(m, node))
   of nkIfStmt:
-    result.addLines(translateIf(m, node, indentLevel))
+    result.add(translateIfExpr(m, node))
   of nkCommentStmt:
     discard
   else:
-    result.add(indent(indentLevel) & "# unsupported node: " & $node.kind)
+    result.add(%* ("# unsupported node: " & $node.kind))
 
-proc extractReturnType(procNode: PNode): string =
-  if procNode[paramsPos].len == 0: return "any()"
-  let retNode = procNode[paramsPos][0]
-  if retNode.kind == nkSym:
-    return mapTypeSym(retNode.sym)
-  result = "any()"
+# ---------------------------------------------------------------------------
+# Procedure generation
 
-proc extractParams(procNode: PNode): seq[(string, string)] =
-  result = @[]
-  let paramsNode = procNode[paramsPos]
-  for i in 1 ..< paramsNode.len:
-    let paramNode = paramsNode[i]
-    if paramNode.kind != nkIdentDefs:
-      continue
-    var names: seq[string] = @[]
-    var typeSpec = "any()"
-    for child in paramNode:
-      if child.kind == nkSym:
-        case child.sym.kind
-        of skParam:
-          names.add(child.sym.name.s)
-        of skType:
-          typeSpec = mapTypeSym(child.sym)
-        else:
-          discard
-    if names.len == 0:
-      continue
-    for name in names:
-      result.add((name, typeSpec))
+proc buildParam(name: string): JsonNode =
+  elixirTuple(atom(name), emptyKeyword(), atom("Elixir"))
 
 proc genProc(m: BModule; procNode: PNode) =
   let procSym = procNode[namePos].sym
   if procSym.isNil:
     return
+
   let procName = procSym.name.s
-  let returnType = extractReturnType(procNode)
-  let params = extractParams(procNode)
-
-  let specParams = params.mapIt(it[1])
-  let specLine = indent(1) & "@spec " & procName & "(" & specParams.join(", ") & ") :: " & returnType
-  addLine(m, specLine)
-
-  let paramNames = params.mapIt(it[0])
-  let defLine = indent(1) & "def " & procName & "(" & paramNames.join(", ") & ") do"
-  addLine(m, defLine)
+  let paramsNode = procNode[paramsPos]
+  var params: seq[JsonNode] = @[]
+  for i in 1 ..< paramsNode.len:
+    let identDef = paramsNode[i]
+    if identDef.kind != nkIdentDefs:
+      continue
+    for child in identDef:
+      if child.kind == nkSym and child.sym.kind == skParam:
+        params.add(buildParam(child.sym.name.s))
 
   let bodyNode = procNode[bodyPos]
-  var bodyLines = translateStmt(m, bodyNode, 2)
-  if bodyLines.len == 0:
-    bodyLines.add(indent(2) & "nil")
-  for line in bodyLines:
-    addLine(m, line)
+  let bodyStatements = translateStmt(m, bodyNode)
+  let blockNode = makeBlock(bodyStatements)
+  let fnHead = elixirTuple(atom(procName), emptyKeyword(), list(params))
+  let fnKeyword = keyword(@[("do", blockNode)])
 
-  addLine(m, indent(1) & "end")
-  addLine(m, "")
+  let defNode = elixirTuple(atom("def"), metaFromNode(m, procNode), list(@[fnHead, fnKeyword]))
+  m.forms.add(defNode)
+
+# ---------------------------------------------------------------------------
+# Module assembly
+
+proc moduleAst(m: BModule): JsonNode =
+  let aliasList = aliasSegments(m.elixirModuleName).mapIt(atom(it))
+  let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(aliasList))
+  let blockNode = makeBlock(m.forms)
+  let kw = keyword(@[("do", blockNode)])
+  var moduleMetaPairs: seq[(string, JsonNode)] = @[]
+  if m.sourcePath.len > 0:
+    moduleMetaPairs.add(("file", %* m.sourcePath))
+  elixirTuple(atom("defmodule"), keyword(moduleMetaPairs), list(@[aliasNode, kw]))
+
+proc writeArtifact(m: BModule) =
+  let moduleNode = moduleAst(m)
+  let artifact = %* {
+    "version": artifactVersion,
+    "module": m.elixirModuleName,
+    "sar_file": m.sourcePath,
+    "quoted": moduleNode
+  }
+
+  let baseDir = getNimcacheDir(m.config)
+  let outDirPath = joinPath(baseDir.string, "elixir")
+  createDir(outDirPath)
+  let outFilePath = joinPath(outDirPath, m.elixirModuleName & ".elixir_ast.json")
+  try:
+    writeFile(outFilePath, pretty(artifact, 2) & "\n")
+  except IOError:
+    rawMessage(m.config, errCannotOpenFile, outFilePath)
+
+# ---------------------------------------------------------------------------
+# Pipeline hooks
 
 proc setupElixirgen*(graph: ModuleGraph; module: PSym; idgen: IdGenerator): PPassContext =
   result = BModule(module: module, graph: graph, config: graph.config)
   result.idgen = idgen
   let rawName = if module != nil: module.name.s else: graph.config.projectName
+  let sourcePath = if module != nil: toFullPath(graph.config, module.info) else: graph.config.projectFull.string
   BModule(result).moduleName = rawName
   BModule(result).elixirModuleName = toElixirModuleName(rawName)
+  BModule(result).sourcePath = sourcePath
 
 proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   if b.isNil:
@@ -275,28 +364,8 @@ proc finalElixirCodeGen*(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
   if pipelineutils.skipCodegen(m.config, n):
     return n
 
-  var lines: seq[string] = @[]
-  lines.add("# Generated by Nim -> Elixir experimental backend")
-  lines.add("defmodule " & m.elixirModuleName & " do")
+  if m.forms.len == 0:
+    m.forms.add(%* "# module has no translated procedures")
 
-  if m.lines.len == 0:
-    lines.add(indent(1) & "# TODO: No procedures translated")
-    lines.add(indent(1) & "def main do")
-    lines.add(indent(2) & "IO.puts(\"stub: " & m.elixirModuleName & "\")")
-    lines.add(indent(1) & "end")
-  else:
-    for line in m.lines:
-      lines.add(line)
-
-  lines.add("end")
-
-  let code = lines.join("\n") & "\n"
-
-  let baseDir = getNimcacheDir(m.config)
-  let outDirPath = joinPath(baseDir.string, "elixir")
-  createDir(outDirPath)
-  let outFilePath = joinPath(outDirPath, m.elixirModuleName & ".exs")
-  try:
-    writeFile(outFilePath, code)
-  except IOError:
-    rawMessage(m.config, errCannotOpenFile, outFilePath)
+  m.writeArtifact()
+  result = n
