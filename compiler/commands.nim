@@ -473,6 +473,7 @@ proc parseCommand*(command: string): Command =
   of "cpp", "compiletocpp": cmdCompileToCpp
   of "objc", "compiletooc": cmdCompileToOC
   of "js", "compiletojs": cmdCompileToJS
+  of "elixir", "compiletoelixir": cmdCompileToElixir
   of "nif": cmdCompileToNif
   of "r": cmdCrun
   of "m": cmdM
@@ -508,6 +509,7 @@ proc setCmd*(conf: ConfigRef, cmd: Command) =
   of cmdCompileToCpp: conf.backend = backendCpp
   of cmdCompileToOC: conf.backend = backendObjc
   of cmdCompileToJS: conf.backend = backendJs
+  of cmdCompileToElixir: conf.backend = backendElixir
   of cmdCompileToNif: conf.backend = backendNif
   else: discard
 

@@ -8,7 +8,7 @@ import pipelineutils
 import ../dist/checksums/src/checksums/sha1
 
 when not defined(leanCompiler):
-  import jsgen, docgen2
+  import jsgen, docgen2, elixirgen
 
 import std/[syncio, objectdollar, assertions, tables, strutils, strtabs]
 import renderer
@@ -30,6 +30,11 @@ proc processPipeline(graph: ModuleGraph; semNode: PNode; bModule: PPassContext):
   of JSgenPass:
     when not defined(leanCompiler):
       result = processJSCodeGen(bModule, semNode)
+    else:
+      result = nil
+  of ElixirgenPass:
+    when not defined(leanCompiler):
+      result = processElixirCodeGen(bModule, semNode)
     else:
       result = nil
   of GenDependPass:
@@ -112,6 +117,11 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
     of JSgenPass:
       when not defined(leanCompiler):
         setupJSgen(graph, module, idgen)
+      else:
+        nil
+    of ElixirgenPass:
+      when not defined(leanCompiler):
+        setupElixirgen(graph, module, idgen)
       else:
         nil
     of EvalPass, InterpreterPass:
@@ -203,6 +213,9 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
   of JSgenPass:
     when not defined(leanCompiler):
       discard finalJSCodeGen(graph, bModule, finalNode)
+  of ElixirgenPass:
+    when not defined(leanCompiler):
+      discard finalElixirCodeGen(graph, bModule, finalNode)
   of EvalPass, InterpreterPass:
     discard interpreterCode(bModule, finalNode)
   of SemPass, GenDependPass:

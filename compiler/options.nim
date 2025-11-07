@@ -138,6 +138,7 @@ type
     backendC = "c"
     backendCpp = "cpp"
     backendJs = "js"
+    backendElixir = "elixir"
     backendObjc = "objc"
     backendNif = "nif"
     # backendNimscript = "nimscript" # this could actually work
@@ -146,7 +147,7 @@ type
   Command* = enum  ## Nim's commands
     cmdNone # not yet processed command
     cmdUnknown # command unmapped
-    cmdCompileToC, cmdCompileToCpp, cmdCompileToOC, cmdCompileToJS,
+    cmdCompileToC, cmdCompileToCpp, cmdCompileToOC, cmdCompileToJS, cmdCompileToElixir,
     cmdCrun # compile and run in nimache
     cmdTcc # run the project via TCC backend
     cmdCheck # semantic checking for whole project
@@ -176,7 +177,7 @@ type
 
 const
   cmdBackends* = {cmdCompileToC, cmdCompileToCpp, cmdCompileToOC,
-                  cmdCompileToJS, cmdCrun, cmdCompileToNif}
+                  cmdCompileToJS, cmdCompileToElixir, cmdCrun, cmdCompileToNif}
   cmdDocLike* = {cmdDoc0, cmdDoc, cmdDoc2tex, cmdJsondoc0, cmdJsondoc,
                  cmdCtags, cmdBuildindex}
 

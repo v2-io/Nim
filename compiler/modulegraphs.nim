@@ -59,6 +59,7 @@ type
     NonePass
     SemPass
     JSgenPass
+    ElixirgenPass
     CgenPass
     NifgenPass
     EvalPass

@@ -188,6 +188,17 @@ proc commandCompileToJS(graph: ModuleGraph) =
     if optGenScript in conf.globalOptions:
       writeDepsFile(graph)
 
+proc commandCompileToElixir(graph: ModuleGraph) =
+  let conf = graph.config
+  when defined(leanCompiler):
+    globalError(conf, unknownLineInfo, "compiler wasn't built with Elixir code generator")
+  else:
+    if conf.outDir.isEmpty:
+      conf.outDir = getNimcacheDir(conf)
+      createDir(conf.outDir.string)
+    setPipeLinePass(graph, ElixirgenPass)
+    compilePipelineProject(graph)
+
 proc commandInteractive(graph: ModuleGraph) =
   graph.config.setErrorMaxHighMaybe
   initDefines(graph.config.symbols)
@@ -247,6 +258,7 @@ proc setOutFile*(conf: ConfigRef) =
       base.add "_" & hashMainCompilationParams(conf)
     let targetName =
       if conf.backend == backendJs: base & ".js"
+      elif conf.backend == backendElixir: base & ".exs"
       elif optGenDynLib in conf.globalOptions:
         platform.OS[conf.target.targetOS].dllFrmt % base
       elif optGenStaticLib in conf.globalOptions: libNameTmpl(conf) % base
@@ -273,7 +285,12 @@ proc mainCommand*(graph: ModuleGraph) =
       if conf.exc == excNone: conf.exc = excSetjmp
     of backendCpp:
       if conf.exc == excNone: conf.exc = excCpp
-    of backendObjc, backendNif: discard
+    of backendObjc: discard
+    of backendElixir:
+      if conf.outDir.isEmpty:
+        conf.outDir = getNimcacheDir(conf)
+        createDir(conf.outDir.string)
+    of backendNif: discard
     of backendJs:
       if conf.hcrOn:
         # XXX: At the moment, system.nim cannot be compiled in JS mode
@@ -291,6 +308,7 @@ proc mainCommand*(graph: ModuleGraph) =
     of backendCpp: commandCompileToC(graph)
     of backendObjc: commandCompileToC(graph)
     of backendJs: commandCompileToJS(graph)
+    of backendElixir: commandCompileToElixir(graph)
     of backendNif: commandCompileToNif(graph)
     of backendInvalid: raiseAssert "unreachable"
 
