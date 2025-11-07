@@ -1,7 +1,7 @@
 # Nim Elixir Backend (JSON AST prototype)
 
 import
-  ast, modulegraphs, options, msgs, idents, lineinfos
+  ast, modulegraphs, options, msgs, idents, lineinfos, pathutils
 
 import pipelineutils
 
@@ -21,6 +21,8 @@ type
     moduleName: string
     elixirModuleName: string
     sourcePath: string
+    sourceDisplayPath: string
+    projectDir: string
     forms: seq[JsonNode]
 
   BModule = ref TElixirGen
@@ -96,14 +98,28 @@ proc aliasSegments(name: string): seq[string] =
 # ---------------------------------------------------------------------------
 # Metadata helpers
 
+proc relativize(m: BModule; absPath: string): string =
+  if absPath.len == 0:
+    return absPath
+  if m.projectDir.len == 0:
+    return absPath
+  try:
+    result = relativePath(absPath, m.projectDir)
+  except OSError:
+    result = absPath
+
 proc metaFromInfo(m: BModule; info: TLineInfo): JsonNode =
   var pairs: seq[(string, JsonNode)] = @[]
   if info.line.int > 0:
     pairs.add(("line", %* info.line.int))
   if info.col.int > 0:
     pairs.add(("column", %* info.col.int))
-  let filePath = toFullPath(m.config, info)
-  let fileValue = if filePath.len > 0: filePath else: m.sourcePath
+  let relPath = toFilename(m.config, info)
+  let fileValue =
+    if relPath.len > 0:
+      relPath
+    else:
+      relativize(m, toFullPath(m.config, info))
   if fileValue.len > 0:
     pairs.add(("file", %* fileValue))
   keyword(pairs)
@@ -300,8 +316,8 @@ proc moduleAst(m: BModule): JsonNode =
   let blockNode = makeBlock(m.forms)
   let kw = keyword(@[("do", blockNode)])
   var moduleMetaPairs: seq[(string, JsonNode)] = @[]
-  if m.sourcePath.len > 0:
-    moduleMetaPairs.add(("file", %* m.sourcePath))
+  if m.sourceDisplayPath.len > 0:
+    moduleMetaPairs.add(("file", %* m.sourceDisplayPath))
   elixirTuple(atom("defmodule"), keyword(moduleMetaPairs), list(@[aliasNode, kw]))
 
 proc writeArtifact(m: BModule) =
@@ -309,7 +325,7 @@ proc writeArtifact(m: BModule) =
   let artifact = %* {
     "version": artifactVersion,
     "module": m.elixirModuleName,
-    "sar_file": m.sourcePath,
+    "sar_file": m.sourceDisplayPath,
     "quoted": moduleNode
   }
 
@@ -330,9 +346,18 @@ proc setupElixirgen*(graph: ModuleGraph; module: PSym; idgen: IdGenerator): PPas
   result.idgen = idgen
   let rawName = if module != nil: module.name.s else: graph.config.projectName
   let sourcePath = if module != nil: toFullPath(graph.config, module.info) else: graph.config.projectFull.string
+  let projectDir = parentDir(graph.config.projectFull.string)
+  var displayPath = sourcePath
+  if projectDir.len > 0 and sourcePath.len > 0:
+    try:
+      displayPath = relativePath(sourcePath, projectDir)
+    except OSError:
+      discard
   BModule(result).moduleName = rawName
   BModule(result).elixirModuleName = toElixirModuleName(rawName)
   BModule(result).sourcePath = sourcePath
+  BModule(result).sourceDisplayPath = displayPath
+  BModule(result).projectDir = projectDir
 
 proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   if b.isNil:
