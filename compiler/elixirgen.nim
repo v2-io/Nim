@@ -650,6 +650,54 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
         result.add(%* "# unsupported prefix operator")
     else:
       result.add(%* "# invalid prefix expression")
+  of nkTryStmt:
+    # Try/except/finally → try/rescue/after
+    # node[0]: try body
+    # node[1..n]: except branches (nkExceptBranch) and/or finally (nkFinally)
+    var tryBody: seq[JsonNode] = @[]
+    var rescueClauses: seq[JsonNode] = @[]
+    var afterBody: seq[JsonNode] = @[]
+
+    # Extract try body
+    if node.len > 0:
+      tryBody = translateStmt(m, node[0])
+
+    # Process except/finally branches
+    for i in 1 ..< node.len:
+      case node[i].kind
+      of nkExceptBranch:
+        # Except branch: except: body
+        # Create rescue clause with error variable pattern
+        var exceptBody: seq[JsonNode] = @[]
+        for j in 0 ..< node[i].len:
+          exceptBody.addAll(translateStmt(m, node[i][j]))
+
+        # Create rescue clause: error -> body
+        # Pattern is a variable that catches the exception
+        let errorVar = elixirTuple(atom("error"), emptyKeyword(), atom("Elixir"))
+        let arrow = elixirTuple(atom("->"), emptyKeyword(),
+                               list(@[list(@[errorVar]), makeBlock(exceptBody)]))
+        rescueClauses.add(arrow)
+      of nkFinally:
+        # Finally branch: finally: body
+        if node[i].len > 0:
+          afterBody = translateStmt(m, node[i][0])
+      else:
+        discard
+
+    # Build try expression with do/rescue/after keyword list
+    var tryParts: seq[(string, JsonNode)] = @[]
+    tryParts.add(("do", makeBlock(tryBody)))
+
+    if rescueClauses.len > 0:
+      tryParts.add(("rescue", list(rescueClauses)))
+
+    if afterBody.len > 0:
+      tryParts.add(("after", makeBlock(afterBody)))
+
+    let tryExpr = elixirTuple(atom("try"), metaFromNode(m, node),
+                             list(@[keyword(tryParts)]))
+    result.add(tryExpr)
   else:
     result.add(%* ("# unsupported node: " & $node.kind))
 
