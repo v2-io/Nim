@@ -301,10 +301,23 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
     translateCall(m, n)
   of nkIfExpr, nkIfStmt:
     translateIfExpr(m, n)
-  of nkPar, nkExprEqExpr, nkHiddenAddr, nkHiddenDeref:
+  of nkPar:
+    # Tuples: (a, b) → {:{},[],[a,b]} or single element (a) → a (grouping)
+    if n.len == 0:
+      %* "# empty tuple"
+    elif n.len == 1:
+      # Single element in parens is just grouping
+      translateExpr(m, n[0])
+    else:
+      # Multiple elements = tuple
+      var elements: seq[JsonNode] = @[]
+      for child in n:
+        elements.add(translateExpr(m, child))
+      elixirTuple(atom("{}"), metaFromNode(m, n), list(elements))
+  of nkExprEqExpr, nkHiddenAddr, nkHiddenDeref:
     if n.len > 0: translateExpr(m, n[0]) else: %* "# empty"
-  of nkHiddenStdConv, nkHiddenCallConv:
-    # Hidden conversions: child[0] is calling convention, child[1] is the actual expression
+  of nkHiddenStdConv, nkHiddenCallConv, nkHiddenSubConv:
+    # Hidden conversions: child[0] is calling convention/type, child[1] is the actual expression
     if n.len > 1: translateExpr(m, n[1])
     elif n.len > 0: translateExpr(m, n[0])
     else: %* "# empty"
@@ -314,6 +327,13 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
     for child in n:
       elements.add(translateExpr(m, child))
     list(elements)
+  of nkTupleConstr:
+    # Tuple construction after semantic analysis (x, y) → {:{},[],[x,y]}
+    var elements: seq[JsonNode] = @[]
+    for child in n:
+      if child.kind != nkEmpty:
+        elements.add(translateExpr(m, child))
+    elixirTuple(atom("{}"), metaFromNode(m, n), list(elements))
   else:
     %* ("# unsupported " & $n.kind)
 
