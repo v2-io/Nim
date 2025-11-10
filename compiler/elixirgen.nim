@@ -162,6 +162,8 @@ proc mapOperator(name: string): string =
 
 proc translateExpr(m: BModule; n: PNode): JsonNode
 proc translateStmt(m: BModule; node: PNode): seq[JsonNode]
+proc getElixirPragma(procNode: PNode): string
+proc parseElixirCall(callSpec: string): (string, string)
 
 proc translateIfExpr(m: BModule; node: PNode): JsonNode =
   if node.len == 0:
@@ -278,6 +280,23 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
     else:
       # Regular arg
       args.add(translateExpr(m, n[i]))
+
+  # Check if this is an FFI binding (function with {.elixir: "Module.function".} pragma)
+  # If so, inline the Elixir call directly instead of generating a wrapper call
+  let callSym = n[0].sym
+  if not callSym.isNil and callSym.kind == skProc:
+    # Try to get the elixir pragma from the function definition
+    if not callSym.ast.isNil:
+      let elixirCall = getElixirPragma(callSym.ast)
+      if elixirCall.len > 0:
+        # This is an FFI binding - inline the Elixir call
+        let (moduleName, functionName) = parseElixirCall(elixirCall)
+        if moduleName.len > 0:
+          # Module.function call
+          return remoteCallNode(m, moduleName, functionName, args, n)
+        else:
+          # Kernel function (no module prefix)
+          return callNode(m, functionName, args, n)
 
   # Handle special commands
   case name
@@ -638,6 +657,10 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         if opName == "not":
           # Unary not operator
           elixirTuple(atom("not"), metaFromNode(m, n), list(@[operand]))
+        elif opName == "@":
+          # Sequence constructor: @[x, y] → [x, y]
+          # In Nim, @ converts array to sequence. In Elixir, just use the list directly.
+          operand
         else:
           # Other prefix operators
           opNode(m, opName, @[operand], n)
