@@ -1037,9 +1037,29 @@ proc genProc(m: BModule; procNode: PNode) =
   # If so, automatically add "use GenServer" to the module
   let procName = procSym.name.s
   const genServerCallbacks = ["init", "handle_call", "handle_cast", "handle_info", "terminate", "code_change"]
+  var isGenServerCallback = false
   if procName in genServerCallbacks:
     if "GenServer" notin m.useDirectives:
       m.useDirectives.add("GenServer")
+    isGenServerCallback = true
+
+  # Check for doc comment on proc node
+  let docComment = procNode.comment
+  if docComment.len > 0:
+    # Generate @doc "..." before this function
+    let docString = %* docComment
+    let docAttr = elixirTuple(atom("@"), emptyKeyword(), list(@[
+      elixirTuple(atom("doc"), emptyKeyword(), list(@[docString]))
+    ]))
+    m.forms.add(docAttr)
+
+  # Add @impl true for GenServer callbacks
+  if isGenServerCallback:
+    let implAttr = elixirTuple(atom("@"), emptyKeyword(), list(@[
+      elixirTuple(atom("impl"), emptyKeyword(), list(@[%* true]))
+    ]))
+    m.forms.add(implAttr)
+
   let paramsNode = procNode[paramsPos]
   var params: seq[JsonNode] = @[]
   for i in 1 ..< paramsNode.len:
@@ -1243,6 +1263,19 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
 
   case n.kind
   of nkStmtList:
+    # Check if the module itself has a doc comment (should be on the first node or the stmtlist)
+    # Try module node first, then n itself
+    var moduleDoc = ""
+    if not m.module.isNil and not m.module.ast.isNil:
+      moduleDoc = m.module.ast.comment
+    if moduleDoc.len == 0:
+      moduleDoc = n.comment
+    if moduleDoc.len > 0 and m.moduleAttributes.len == 0:
+      # Add @moduledoc if we haven't added it yet
+      let found = m.moduleAttributes.anyIt(it[0] == "moduledoc")
+      if not found:
+        m.moduleAttributes.add(("moduledoc", %* moduleDoc))
+
     for child in n:
       if child.kind == nkProcDef:
         genProc(m, child)
@@ -1252,10 +1285,18 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
       elif child.kind == nkConstSection:
         # Process const section to extract module-level constants
         processConstSection(m, child)
+      elif child.kind == nkCommentStmt and m.moduleAttributes.len == 0:
+        # If this is the first thing in the module and it's a comment, use it as @moduledoc
+        let commentText = child.comment
+        if commentText.len > 0:
+          let found = m.moduleAttributes.anyIt(it[0] == "moduledoc")
+          if not found:
+            m.moduleAttributes.add(("moduledoc", %* commentText))
       else:
         # Collect non-proc module-level statements for __sar_main__/0
-        let stmts = translateStmt(m, child)
-        m.moduleStmts.addAll(stmts)
+        if child.kind != nkCommentStmt:  # Skip standalone comments
+          let stmts = translateStmt(m, child)
+          m.moduleStmts.addAll(stmts)
   of nkProcDef:
     genProc(m, n)
   of nkTypeSection:
