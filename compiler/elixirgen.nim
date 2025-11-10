@@ -291,12 +291,21 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
       if elixirCall.len > 0:
         # This is an FFI binding - inline the Elixir call
         let (moduleName, functionName) = parseElixirCall(elixirCall)
+
+        # Special handling for GenServer functions: convert string literals to atoms for server names
+        # GenServer.cast/call/stop expect first arg to be a server reference (PID, atom, {name, node})
+        var processedArgs = args
+        if moduleName == "GenServer" and functionName in ["cast", "call", "stop", "whereis"]:
+          if args.len > 0 and args[0].kind == JString:
+            # Convert string literal to atom
+            processedArgs = @[atom(args[0].getStr())] & args[1..^1]
+
         if moduleName.len > 0:
           # Module.function call
-          return remoteCallNode(m, moduleName, functionName, args, n)
+          return remoteCallNode(m, moduleName, functionName, processedArgs, n)
         else:
           # Kernel function (no module prefix)
-          return callNode(m, functionName, args, n)
+          return callNode(m, functionName, processedArgs, n)
 
   # Handle special commands
   case name
