@@ -707,7 +707,131 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
 proc buildParam(name: string): JsonNode =
   elixirTuple(atom(name), emptyKeyword(), atom("Elixir"))
 
+proc tryGenerateMultipleClauses(m: BModule; procNode: PNode): bool =
+  ## Try to generate multiple function clauses when the body is a single case statement on a parameter.
+  ## Returns true if successful, false if normal single-clause generation should be used.
+
+  let procSym = procNode[namePos].sym
+  if procSym.isNil:
+    return false
+
+  let procName = procSym.name.s
+  let paramsNode = procNode[paramsPos]
+  let bodyNode = procNode[bodyPos]
+
+  # Collect parameter names
+  var paramNames: seq[string] = @[]
+  for i in 1 ..< paramsNode.len:
+    let identDef = paramsNode[i]
+    if identDef.kind != nkIdentDefs:
+      continue
+    for child in identDef:
+      if child.kind == nkSym and child.sym.kind == skParam:
+        paramNames.add(child.sym.name.s)
+
+  # Try to extract a case statement from the body
+  var caseStmt: PNode = nil
+
+  # Check if body is nkStmtList with single case statement
+  if bodyNode.kind == nkStmtList and bodyNode.len == 1:
+    if bodyNode[0].kind == nkCaseStmt:
+      caseStmt = bodyNode[0]
+
+  # Check if body is nkAsgn (result = case ...)
+  elif bodyNode.kind == nkAsgn and bodyNode.len >= 2:
+    if bodyNode[1].kind == nkCaseStmt:
+      caseStmt = bodyNode[1]
+
+  # If no case statement found, use normal generation
+  if caseStmt.isNil or caseStmt.len < 2:
+    return false
+
+  # Check if case selector is a parameter
+  let selectorNode = caseStmt[0]
+  var paramIndex = -1
+  if selectorNode.kind == nkSym and not selectorNode.sym.isNil:
+    let selectorName = selectorNode.sym.name.s
+    for i, pname in paramNames:
+      if pname == selectorName:
+        paramIndex = i
+        break
+
+  # If selector is not a parameter, use normal generation
+  if paramIndex < 0:
+    return false
+
+  # Generate multiple clauses!
+  for branchIdx in 1 ..< caseStmt.len:
+    let branch = caseStmt[branchIdx]
+
+    case branch.kind
+    of nkOfBranch:
+      # Pattern branch: of value: body
+      if branch.len >= 2:
+        # Each pattern becomes a separate clause
+        for patIdx in 0 ..< branch.len - 1:
+          var params: seq[JsonNode] = @[]
+          for i, pname in paramNames:
+            if i == paramIndex:
+              # This parameter position gets the pattern
+              let pattern = translateExpr(m, branch[patIdx])
+              params.add(pattern)
+            else:
+              # Other parameters stay as variables
+              params.add(buildParam(pname))
+
+          # Translate body
+          let bodyNode = branch[^1]
+          let blockNode =
+            if bodyNode.kind in {nkIntLit, nkFloatLit, nkStrLit, nkSym, nkCall, nkInfix, nkPrefix}:
+              # Single expression - translate as expression
+              translateExpr(m, bodyNode)
+            else:
+              # Multiple statements - translate as statement list
+              let bodyStatements = translateStmt(m, bodyNode)
+              makeBlock(bodyStatements)
+          let fnHead = elixirTuple(atom(procName), emptyKeyword(), list(params))
+          let fnKeyword = keyword(@[("do", blockNode)])
+          let defNode = elixirTuple(atom("def"), metaFromNode(m, procNode), list(@[fnHead, fnKeyword]))
+          m.forms.add(defNode)
+
+    of nkElse:
+      # Else branch: use catch-all variable in parameter position
+      var params: seq[JsonNode] = @[]
+      for i, pname in paramNames:
+        if i == paramIndex:
+          # Use the original parameter name as catch-all
+          params.add(buildParam(pname))
+        else:
+          params.add(buildParam(pname))
+
+      # Translate body
+      var bodyStatements: seq[JsonNode] = @[]
+      for child in branch:
+        bodyStatements.addAll(translateStmt(m, child))
+      let blockNode =
+        if bodyStatements.len == 1:
+          # Single statement/expression - return as-is
+          bodyStatements[0]
+        else:
+          # Multiple statements - wrap in block
+          makeBlock(bodyStatements)
+      let fnHead = elixirTuple(atom(procName), emptyKeyword(), list(params))
+      let fnKeyword = keyword(@[("do", blockNode)])
+      let defNode = elixirTuple(atom("def"), metaFromNode(m, procNode), list(@[fnHead, fnKeyword]))
+      m.forms.add(defNode)
+
+    else:
+      discard
+
+  return true
+
 proc genProc(m: BModule; procNode: PNode) =
+  # Try to generate multiple clauses from case-on-parameter pattern
+  if tryGenerateMultipleClauses(m, procNode):
+    return  # Multiple clauses generated, we're done
+
+  # Normal single-clause generation
   let procSym = procNode[namePos].sym
   if procSym.isNil:
     return
