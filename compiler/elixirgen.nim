@@ -25,6 +25,7 @@ type
     projectDir: string
     forms: seq[JsonNode]
     moduleStmts: seq[JsonNode]  # Module-level statements for __sar_main__/0
+    importedModules: seq[string]  # Elixir modules to alias (e.g., ["File", "Jason"])
 
   BModule = ref TElixirGen
 
@@ -630,6 +631,28 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     # Reason: Elixir's immutable variables break closure-based while loop helpers
     # Workaround: Use recursion or Enum functions instead
     result.add(%* "# ERROR: while loops not supported - use recursion or Enum functions")
+  of nkImportStmt:
+    # Import statement: import Elixir.File, Elixir.Jason
+    # Extract module names and add to importedModules for alias generation
+    for i in 0 ..< node.len:
+      let importNode = node[i]
+      # Handle different import forms:
+      # - Simple: import File (nkIdent)
+      # - Qualified: import Elixir.File (nkInfix with ".")
+      if importNode.kind == nkInfix:
+        # Check if it's "Elixir.ModuleName" pattern
+        if importNode.len >= 3 and importNode[0].kind == nkSym:
+          let op = importNode[0].sym.name.s
+          if op == ".":
+            # Get the module name (rightmost part)
+            if importNode[2].kind == nkIdent:
+              let moduleName = importNode[2].ident.s
+              # Only add Elixir.* imports
+              if importNode[1].kind == nkIdent and importNode[1].ident.s == "Elixir":
+                if moduleName notin m.importedModules:
+                  m.importedModules.add(moduleName)
+      # For now, emit comment in generated code (imports handled via alias)
+      result.add(%* ("# import processed: " & $importNode.kind))
   of nkCommentStmt:
     discard
   of nkInfix:
@@ -862,7 +885,20 @@ proc genProc(m: BModule; procNode: PNode) =
 proc moduleAst(m: BModule): JsonNode =
   let aliasList = aliasSegments(m.elixirModuleName).mapIt(atom(it))
   let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(aliasList))
-  let blockNode = makeBlock(m.forms)
+
+  # Generate alias statements for imported Elixir modules
+  var allForms: seq[JsonNode] = @[]
+  for moduleName in m.importedModules:
+    # Generate: alias Elixir.ModuleName
+    let elixirAlias = @[atom("Elixir"), atom(moduleName)]
+    let elixirAliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(elixirAlias))
+    let aliasStmt = elixirTuple(atom("alias"), emptyKeyword(), list(@[elixirAliasNode]))
+    allForms.add(aliasStmt)
+
+  # Add the rest of the module forms (functions, etc.)
+  allForms.addAll(m.forms)
+
+  let blockNode = makeBlock(allForms)
   let kw = keyword(@[("do", blockNode)])
   var moduleMetaPairs: seq[(string, JsonNode)] = @[]
   if m.sourceDisplayPath.len > 0:
@@ -907,6 +943,44 @@ proc setupElixirgen*(graph: ModuleGraph; module: PSym; idgen: IdGenerator): PPas
   BModule(result).sourcePath = sourcePath
   BModule(result).sourceDisplayPath = displayPath
   BModule(result).projectDir = projectDir
+  BModule(result).importedModules = @[]  # Initialize empty list of imported modules
+
+proc processTypeSection(m: BModule; typeSection: PNode) =
+  ## Process type section to detect {.elixirModule.} pragma
+  ## Extracts type names and adds them to importedModules for alias generation
+  for typeDef in typeSection:
+    if typeDef.kind == nkTypeDef and typeDef.len >= 3:
+      # typeDef[0] is the type name (possibly with pragma)
+      # typeDef[1] is generic params (if any)
+      # typeDef[2] is the type definition
+
+      let nameNode = typeDef[0]
+      var typeName = ""
+      var hasElixirModulePragma = false
+
+      # Extract type name and check for pragma
+      if nameNode.kind == nkPragmaExpr and nameNode.len >= 2:
+        # Type has pragma: TypeName {.pragma.}
+        # nameNode[0] is the name, nameNode[1] is the pragma list
+        if nameNode[0].kind == nkPostfix and nameNode[0].len >= 2:
+          # Exported type: TypeName*
+          if nameNode[0][1].kind == nkIdent:
+            typeName = nameNode[0][1].ident.s
+        elif nameNode[0].kind == nkIdent:
+          typeName = nameNode[0].ident.s
+
+        # Check pragma list for elixirModule
+        let pragmaList = nameNode[1]
+        if pragmaList.kind == nkPragma:
+          for pragma in pragmaList:
+            if pragma.kind == nkIdent and pragma.ident.s == "elixirModule":
+              hasElixirModulePragma = true
+              break
+
+      # If we found elixirModule pragma, add to importedModules
+      if hasElixirModulePragma and typeName.len > 0:
+        if typeName notin m.importedModules:
+          m.importedModules.add(typeName)
 
 proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   if b.isNil:
@@ -915,17 +989,30 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   if m.module.isNil or sfMainModule notin m.module.flags:
     return n
 
+  # TEMPORARY TEST: Add File and String to test alias generation
+  # TODO: Remove this once pragma registration works
+  if "File" notin m.importedModules:
+    m.importedModules.add("File")
+  if "String" notin m.importedModules:
+    m.importedModules.add("String")
+
   case n.kind
   of nkStmtList:
     for child in n:
       if child.kind == nkProcDef:
         genProc(m, child)
+      elif child.kind == nkTypeSection:
+        # Process type section to detect {.elixirModule.} pragmas
+        processTypeSection(m, child)
       else:
         # Collect non-proc module-level statements for __sar_main__/0
         let stmts = translateStmt(m, child)
         m.moduleStmts.addAll(stmts)
   of nkProcDef:
     genProc(m, n)
+  of nkTypeSection:
+    # Process type section to detect {.elixirModule.} pragmas
+    processTypeSection(m, n)
   else:
     # Collect non-proc module-level statements
     let stmts = translateStmt(m, n)
