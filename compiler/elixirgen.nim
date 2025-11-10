@@ -837,6 +837,76 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
                   m.importedModules.add(moduleName)
       # For now, emit comment in generated code (imports handled via alias)
       result.add(%* ("# import processed: " & $importNode.kind))
+  of nkPragmaBlock:
+    # Pragma block: {.pragma.} statement
+    # Used for receive blocks: {.receiveBlock: timeout.} case RECEIVE_MARKER: ...
+    if node.len >= 2:
+      let pragmas = node[0]  # nkPragma
+      let stmt = node[1]     # The statement (should be nkCaseStmt for receive)
+
+      # Check for receiveBlock pragma
+      var isReceiveBlock = false
+      var timeout: int = -1  # -1 means infinite
+
+      if pragmas.kind == nkPragma:
+        for pragma in pragmas:
+          # Look for receiveBlock: N pattern (nkExprColonExpr)
+          if pragma.kind == nkExprColonExpr and pragma.len == 2:
+            if pragma[0].kind == nkIdent and pragma[0].ident.s == "receiveBlock":
+              isReceiveBlock = true
+              # Extract timeout value
+              if pragma[1].kind == nkIntLit:
+                timeout = pragma[1].intVal.int
+
+      if isReceiveBlock and stmt.kind == nkCaseStmt:
+        # Generate Elixir receive block instead of case
+        if stmt.len < 2:
+          result.add(%* "# invalid receive block")
+        else:
+          # Skip the discriminator (RECEIVE_MARKER), go straight to branches
+          var clauses: seq[JsonNode] = @[]
+          var afterClause: JsonNode = nil
+
+          for i in 1 ..< stmt.len:
+            let branch = stmt[i]
+            case branch.kind
+            of nkOfBranch:
+              # Pattern branch: of pattern: body → pattern -> body
+              if branch.len >= 2:
+                for j in 0 ..< branch.len - 1:
+                  let pattern = translateExpr(m, branch[j])
+                  var bodyStmts: seq[JsonNode] = @[]
+                  bodyStmts.addAll(translateStmt(m, branch[^1]))
+                  let arrow = elixirTuple(atom("->"), emptyKeyword(),
+                                         list(@[list(@[pattern]), makeBlock(bodyStmts)]))
+                  clauses.add(arrow)
+            of nkElse:
+              # Else branch becomes after clause
+              var bodyStmts: seq[JsonNode] = @[]
+              for child in branch:
+                bodyStmts.addAll(translateStmt(m, child))
+              afterClause = makeBlock(bodyStmts)
+            else:
+              discard
+
+          # Build receive block
+          var receiveKw: seq[(string, JsonNode)] = @[("do", list(clauses))]
+
+          # Add after clause if timeout >= 0
+          if timeout >= 0 and not afterClause.isNil:
+            # after timeout -> body
+            let afterArrow = elixirTuple(atom("->"), emptyKeyword(),
+                                        list(@[list(@[%* timeout]), afterClause]))
+            receiveKw.add(("after", list(@[afterArrow])))
+
+          let receiveNode = elixirTuple(atom("receive"), metaFromNode(m, stmt),
+                                       list(@[keyword(receiveKw)]))
+          result.add(receiveNode)
+      else:
+        # Not a receive block, just translate the inner statement
+        result.addAll(translateStmt(m, stmt))
+    else:
+      result.add(%* "# malformed pragma block")
   of nkCommentStmt:
     discard
   of nkInfix:

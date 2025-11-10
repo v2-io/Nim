@@ -48,6 +48,7 @@ type
     wElixirModule = "elixirModule", wElixir = "elixir",
     wGenServer = "genserver", wSupervisor = "supervisor", wApplication = "application",
     wGenStateMachine = "genstatemachine", wGenStage = "genstage",
+    wReceiveBlock = "receiveBlock",
     wIncompleteStruct = "incompleteStruct", # deprecated
     wCompleteStruct = "completeStruct", wRequiresInit = "requiresInit", wAlign = "align",
     wNodecl = "nodecl", wPure = "pure", wSideEffect = "sideEffect", wHeader = "header",

@@ -61,7 +61,7 @@ const
     wPragma, wEmit, wUnroll,
     wLinearScanEnd, wPatterns, wTrMacros, wEffects, wNoForward, wReorder, wComputedGoto,
     wExperimental, wDoctype, wThis, wUsed, wInvariant, wAssume, wAssert,
-    wGenServer, wSupervisor, wApplication, wGenStateMachine, wGenStage}
+    wGenServer, wSupervisor, wApplication, wGenStateMachine, wGenStage, wReceiveBlock}
   stmtPragmasTopLevel* = {wChecks, wObjChecks, wFieldChecks, wRangeChecks,
     wBoundChecks, wOverflowChecks, wNilChecks, wStaticBoundchecks,
     wStyleChecks, wAssertions,
@@ -1349,6 +1349,11 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         # Marker pragma for Elixir external procs - handled by elixirgen backend
         # Value is the Elixir function name (e.g., "File.read!")
         discard getOptionalStr(c, it, "")
+      of wReceiveBlock:
+        # Marker pragma for receive blocks - handled by elixirgen backend
+        # Value is the timeout in milliseconds (e.g., 5000 for 5 seconds, -1 for infinite)
+        # Backend extracts value directly from AST, so we just validate it exists
+        discard
 
       else: invalidPragma(c, it)
     elif comesFromPush and whichKeyword(ident) != wInvalid:
