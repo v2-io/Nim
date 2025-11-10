@@ -412,8 +412,8 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
 
     if not ownerSym.isNil and ownerSym.kind == skModule:
       let moduleName = ownerSym.name.s
-      # Capitalize module name for Elixir (math -> Math, genserver -> Genserver)
-      let elixirModuleName = moduleName[0].toUpperAscii & moduleName[1..^1]
+      # Convert module name to PascalCase for Elixir (write_buffer -> WriteBuffer)
+      let elixirModuleName = toElixirModuleName(moduleName)
       return remoteCallNode(m, elixirModuleName, name, args, n)
 
   callNode(m, name, args, n)
