@@ -292,13 +292,33 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
         # This is an FFI binding - inline the Elixir call
         let (moduleName, functionName) = parseElixirCall(elixirCall)
 
-        # Special handling for GenServer functions: convert string literals to atoms for server names
-        # GenServer.cast/call/stop expect first arg to be a server reference (PID, atom, {name, node})
+        # Special handling for GenServer functions: convert server names to atoms
+        # GenServer.cast/call/stop/whereis expect first arg to be a server reference (PID, atom, {name, node})
         var processedArgs = args
         if moduleName == "GenServer" and functionName in ["cast", "call", "stop", "whereis"]:
-          if args.len > 0 and args[0].kind == JString:
-            # Convert string literal to atom
-            processedArgs = @[atom(args[0].getStr())] & args[1..^1]
+          if args.len > 0:
+            # Check if first arg needs atom conversion
+            let firstArg = args[0]
+            # Check if it's already an atom (via toElixirAtom tuple structure)
+            let isAtom = firstArg.kind == JObject and
+                         firstArg.hasKey("$tuple") and
+                         firstArg["$tuple"].len >= 3 and
+                         firstArg["$tuple"][0].kind == JObject and
+                         firstArg["$tuple"][0].hasKey("$atom") and
+                         firstArg["$tuple"][0]["$atom"].getStr() == "atom"
+
+            if not isAtom:
+              # If it's a string literal, convert directly to atom
+              if firstArg.kind == JString:
+                processedArgs = @[atom(firstArg.getStr())] & args[1..^1]
+              else:
+                # For non-literal expressions (variables, function calls, etc.),
+                # wrap with String.to_existing_atom/1 for runtime conversion
+                # This is safer than String.to_atom/1 as it prevents atom table exhaustion
+                let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(@[atom("String")]))
+                let dotNode = elixirTuple(atom("."), emptyKeyword(), list(@[aliasNode, atom("to_existing_atom")]))
+                let toAtomCall = elixirTuple(dotNode, emptyKeyword(), list(@[firstArg]))
+                processedArgs = @[toAtomCall] & args[1..^1]
 
         if moduleName.len > 0:
           # Module.function call
