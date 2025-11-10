@@ -375,6 +375,24 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       remoteCallNode(m, "Map", "get", @[obj, fieldAtom], n)
     else:
       %* "# invalid dot expression"
+  of nkLambda, nkDo:
+    # Anonymous function: proc(x: int): int = x + 1 → fn x -> x + 1 end
+    let paramsNode = n[paramsPos]
+    var params: seq[JsonNode] = @[]
+    for i in 1 ..< paramsNode.len:
+      let identDef = paramsNode[i]
+      if identDef.kind == nkIdentDefs:
+        for j in 0 ..< identDef.len - 2:  # -2 to skip type and default value
+          if identDef[j].kind == nkSym and identDef[j].sym.kind == skParam:
+            # Inline parameter node construction
+            params.add(elixirTuple(atom(identDef[j].sym.name.s), emptyKeyword(), atom("Elixir")))
+    let bodyNode = n[bodyPos]
+    let bodyStatements = translateStmt(m, bodyNode)
+    let bodyExpr = makeBlock(bodyStatements)
+    # Elixir fn: {:fn, [], [{:->, [], [[params], body]}]}
+    let arrow = elixirTuple(atom("->"), metaFromNode(m, n),
+                            list(@[list(params), bodyExpr]))
+    elixirTuple(atom("fn"), metaFromNode(m, n), list(@[arrow]))
   else:
     %* ("# unsupported " & $n.kind)
 
