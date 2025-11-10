@@ -329,6 +329,16 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
           filteredArgs = @[args[0], args[1]]
       return remoteCallNode(m, modName, funcName, filteredArgs, n)
 
+  # Check for cross-module calls
+  # When a function is imported from another module, its owner will be different
+  let funcSym = n[0].sym
+  if not funcSym.owner.isNil and funcSym.owner != m.module:
+    # This is a cross-module call - generate remote call
+    let moduleName = funcSym.owner.name.s
+    # Capitalize module name for Elixir (math -> Math)
+    let elixirModuleName = moduleName[0].toUpperAscii & moduleName[1..^1]
+    return remoteCallNode(m, elixirModuleName, name, args, n)
+
   callNode(m, name, args, n)
 
 proc translateInfix(m: BModule; n: PNode): JsonNode =
