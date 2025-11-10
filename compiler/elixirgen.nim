@@ -372,10 +372,21 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
   let funcSym = n[0].sym
   if not funcSym.owner.isNil and funcSym.owner != m.module:
     # This is a cross-module call - generate remote call
-    let moduleName = funcSym.owner.name.s
-    # Capitalize module name for Elixir (math -> Math)
-    let elixirModuleName = moduleName[0].toUpperAscii & moduleName[1..^1]
-    return remoteCallNode(m, elixirModuleName, name, args, n)
+    # If the owner is a proc (wrapper function), climb ownership chain to find the module
+    var ownerSym = funcSym.owner
+    var depth = 0
+    while not ownerSym.isNil and ownerSym.kind != skModule:
+      ownerSym = ownerSym.owner
+      depth.inc
+      if depth > 10:
+        # Safety: prevent infinite loops
+        break
+
+    if not ownerSym.isNil and ownerSym.kind == skModule:
+      let moduleName = ownerSym.name.s
+      # Capitalize module name for Elixir (math -> Math, genserver -> Genserver)
+      let elixirModuleName = moduleName[0].toUpperAscii & moduleName[1..^1]
+      return remoteCallNode(m, elixirModuleName, name, args, n)
 
   callNode(m, name, args, n)
 
@@ -387,7 +398,14 @@ proc translateInfix(m: BModule; n: PNode): JsonNode =
   let right = translateExpr(m, n[2])
   var opName = "+"
   if n[0].kind == nkSym and not n[0].sym.isNil:
-    opName = mapOperator(n[0].sym.name.s)
+    let rawOp = n[0].sym.name.s
+    opName = mapOperator(rawOp)
+    # Special case: & operator - check if it's sequence concat or string concat
+    if rawOp == "&":
+      # Check type of left operand to distinguish seq[T] & seq[T] from string & string
+      if not n[1].typ.isNil and n[1].typ.kind == tySequence:
+        opName = "++"  # Sequence concatenation
+      # else: use "<>" for string concatenation (default from mapOperator)
   elif n[0].kind == nkIdent:
     opName = mapOperator(n[0].ident.s)
   elif n[0].kind == nkOpenSymChoice:
