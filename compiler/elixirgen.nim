@@ -491,6 +491,21 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
   of nkEmpty:
     # Empty nodes should return null instead of unsupported warnings
     newJNull()
+  of nkAsgn:
+    # Assignment as expression: x = value (returns value in Elixir)
+    # This handles cases where assignment appears in expression context
+    if n.len >= 2:
+      let target = n[0]
+      let value = translateExpr(m, n[1])
+      # In Elixir, assignment is an expression that returns the value
+      # Generate: (var = value) which is the pattern match form
+      if target.kind == nkSym and not target.sym.isNil:
+        let varName = target.sym.name.s
+        opNode(m, "=", @[varNode(varName), value], n)
+      else:
+        %* "# unsupported nkAsgn target"
+    else:
+      %* "# invalid nkAsgn"
   of nkStmtListExpr:
     # Statement list as expression (e.g., in let bindings or block returns)
     # Last statement is the value, earlier statements are for side effects
@@ -513,6 +528,15 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         n[n.len - 1]
     let bodyStatements = translateStmt(m, bodyNode)
     makeBlock(bodyStatements)
+  of nkRange:
+    # Range expression: a..b → Elixir range start..end
+    if n.len >= 2:
+      let start = translateExpr(m, n[0])
+      let endVal = translateExpr(m, n[1])
+      # Elixir range: {:.., [], [start, end]}
+      elixirTuple(atom(".."), metaFromNode(m, n), list(@[start, endVal]))
+    else:
+      %* "# invalid range"
   of nkBracketExpr:
     # Array/list/tuple indexing: arr[index]
     # Tuples use elem(tuple, index), lists use Enum.at(list, index)
@@ -633,6 +657,14 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     # Explicit return statement
     if node.len > 0 and node[0].kind != nkEmpty:
       result.add(translateExpr(m, node[0]))
+  of nkDiscardStmt:
+    # Discard statement: discard expr OR just discard
+    # In Elixir, we translate the expression but don't use the result
+    # For bare 'discard', we do nothing (it's a no-op)
+    if node.len > 0 and node[0].kind != nkEmpty:
+      # discard expr - evaluate the expression (may have side effects) but ignore result
+      result.add(translateExpr(m, node[0]))
+    # else: bare 'discard' - no-op, add nothing
   of nkCaseStmt:
     # Case statement: case x of 0: ... of 1: ... else: ...
     if node.len < 2:
