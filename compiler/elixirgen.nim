@@ -234,11 +234,18 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
   let name = n[0].sym.name.s
   var args: seq[JsonNode] = @[]
   for i in 1 ..< n.len:
-    # Flatten varargs (nkBracket) nodes
-    if n[i].kind == nkBracket:
-      for child in n[i]:
+    # Flatten varargs (nkBracket) nodes, including when wrapped in nkHiddenStdConv
+    var argNode = n[i]
+    # Unwrap hidden conversions to check for nkBracket
+    if argNode.kind in {nkHiddenStdConv, nkHiddenCallConv, nkHiddenSubConv} and argNode.len > 1:
+      argNode = argNode[1]
+
+    if argNode.kind == nkBracket:
+      # Flatten bracket (varargs) into individual args
+      for child in argNode:
         args.add(translateExpr(m, child))
     else:
+      # Regular arg
       args.add(translateExpr(m, n[i]))
 
   # Handle special commands
