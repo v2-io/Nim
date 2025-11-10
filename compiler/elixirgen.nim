@@ -1,7 +1,7 @@
 # Nim Elixir Backend (JSON AST prototype)
 
 import
-  ast, modulegraphs, options, msgs, idents, lineinfos
+  ast, types, modulegraphs, options, msgs, idents, lineinfos
 
 import pipelineutils
 
@@ -514,11 +514,18 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
     let bodyStatements = translateStmt(m, bodyNode)
     makeBlock(bodyStatements)
   of nkBracketExpr:
-    # Array/list indexing: arr[index] → Enum.at(arr, index)
+    # Array/list/tuple indexing: arr[index]
+    # Tuples use elem(tuple, index), lists use Enum.at(list, index)
     if n.len >= 2:
       let container = translateExpr(m, n[0])
       let index = translateExpr(m, n[1])
-      remoteCallNode(m, "Enum", "at", @[container, index], n)
+      # Check if container is a tuple type
+      if not n[0].typ.isNil and n[0].typ.kind == tyTuple:
+        # Tuple indexing: elem(tuple, index)
+        remoteCallNode(m, "Kernel", "elem", @[container, index], n)
+      else:
+        # List/array indexing: Enum.at(list, index)
+        remoteCallNode(m, "Enum", "at", @[container, index], n)
     else:
       %* "# invalid bracket expression"
   of nkPrefix:
@@ -609,6 +616,10 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     result.add(translateCall(m, node))
   of nkLetSection, nkVarSection:
     # Handle let/var bindings: let x = 5 or var y = 10
+    # Note: Nim's semantic analysis converts `let (a, b) = tup` into separate
+    # assignments using tmpTuple and nkBracketExpr, which we translate to Enum.at().
+    # This is correct but not optimal - future optimization could detect this pattern
+    # and generate Elixir pattern matching: {a, b} = tup
     for child in node:
       if child.kind == nkIdentDefs and child.len >= 3:
         # child[0] is the identifier, child[^2] is the type, child[^1] is the value
