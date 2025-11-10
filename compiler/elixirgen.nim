@@ -150,6 +150,10 @@ proc mapOperator(name: string): string =
   case name
   of "+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!=": name
   of "&": "<>"
+  of "mod": "rem"  # Nim mod → Elixir rem
+  of "div": "div"  # Integer division
+  of "and": "and"  # Logical and
+  of "or": "or"    # Logical or
   else: name
 
 proc translateExpr(m: BModule; n: PNode): JsonNode
@@ -400,6 +404,31 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         n[n.len - 1]
     let bodyStatements = translateStmt(m, bodyNode)
     makeBlock(bodyStatements)
+  of nkBracketExpr:
+    # Array/list indexing: arr[index] → Enum.at(arr, index)
+    if n.len >= 2:
+      let container = translateExpr(m, n[0])
+      let index = translateExpr(m, n[1])
+      remoteCallNode(m, "Enum", "at", @[container, index], n)
+    else:
+      %* "# invalid bracket expression"
+  of nkPrefix:
+    # Prefix operators: not x → not(x)
+    if n.len >= 2:
+      let op = n[0]
+      let operand = translateExpr(m, n[1])
+      if op.kind == nkSym and not op.sym.isNil:
+        let opName = op.sym.name.s
+        if opName == "not":
+          # Unary not operator
+          elixirTuple(atom("not"), metaFromNode(m, n), list(@[operand]))
+        else:
+          # Other prefix operators
+          opNode(m, opName, @[operand], n)
+      else:
+        %* "# unsupported prefix operator"
+    else:
+      %* "# invalid prefix expression"
   of nkLambda, nkDo:
     # Anonymous function: proc(x: int): int = x + 1 → fn x -> x + 1 end
     let paramsNode = n[paramsPos]
@@ -528,6 +557,24 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     result.add(%* "# ERROR: while loops not supported - use recursion or Enum functions")
   of nkCommentStmt:
     discard
+  of nkInfix:
+    # Infix expressions in statement context (e.g., last expr in block)
+    result.add(translateInfix(m, node))
+  of nkPrefix:
+    # Prefix expressions in statement context
+    if node.len >= 2:
+      let op = node[0]
+      let operand = translateExpr(m, node[1])
+      if op.kind == nkSym and not op.sym.isNil:
+        let opName = op.sym.name.s
+        if opName == "not":
+          result.add(elixirTuple(atom("not"), metaFromNode(m, node), list(@[operand])))
+        else:
+          result.add(opNode(m, opName, @[operand], node))
+      else:
+        result.add(%* "# unsupported prefix operator")
+    else:
+      result.add(%* "# invalid prefix expression")
   else:
     result.add(%* ("# unsupported node: " & $node.kind))
 
