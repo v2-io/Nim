@@ -29,7 +29,7 @@ const
 
 const
   declPragmas = {wImportc, wImportObjC, wImportCpp, wImportJs, wExportc, wExportCpp,
-    wExportNims, wExtern, wDeprecated, wNodecl, wError, wUsed}
+    wExportNims, wElixirModule, wExtern, wDeprecated, wNodecl, wError, wUsed}
     ## common pragmas for declarations, to a good approximation
   procPragmas* = declPragmas + {FirstCallConv..LastCallConv,
     wMagic, wNoSideEffect, wSideEffect, wNoreturn, wNosinks, wDynlib, wHeader,
@@ -38,7 +38,8 @@ const
     wAsmNoStackFrame, wDiscardable, wNoInit, wCodegenDecl,
     wGensym, wInject, wRaises, wEffectsOf, wTags, wForbids, wLocks, wDelegator, wGcSafe,
     wConstructor, wLiftLocals, wStackTrace, wLineTrace, wNoDestroy,
-    wRequires, wEnsures, wEnforceNoRaises, wSystemRaisesDefect, wVirtual, wQuirky, wMember}
+    wRequires, wEnsures, wEnforceNoRaises, wSystemRaisesDefect, wVirtual, wQuirky, wMember,
+    wElixir}
   converterPragmas* = procPragmas
   methodPragmas* = procPragmas+{wBase}-{wImportCpp}
   templatePragmas* = {wDeprecated, wError, wGensym, wInject, wDirty,
@@ -1334,6 +1335,13 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         processVirtual(c, it, sym, sfVirtual)
       of wMember:
         processVirtual(c, it, sym, sfMember)
+      of wElixirModule:
+        # Marker pragma for Elixir module types - handled by elixirgen backend
+        noVal(c, it)
+      of wElixir:
+        # Marker pragma for Elixir external procs - handled by elixirgen backend
+        # Value is the Elixir function name (e.g., "File.read!")
+        discard getOptionalStr(c, it, "")
 
       else: invalidPragma(c, it)
     elif comesFromPush and whichKeyword(ident) != wInvalid:

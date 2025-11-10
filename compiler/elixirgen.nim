@@ -966,8 +966,14 @@ proc processTypeSection(m: BModule; typeSection: PNode) =
           # Exported type: TypeName*
           if nameNode[0][1].kind == nkIdent:
             typeName = nameNode[0][1].ident.s
+          elif nameNode[0][1].kind == nkSym:
+            # Symbol node instead of ident (after semantic analysis)
+            typeName = nameNode[0][1].sym.name.s
         elif nameNode[0].kind == nkIdent:
           typeName = nameNode[0].ident.s
+        elif nameNode[0].kind == nkSym:
+          # Symbol node (after semantic analysis)
+          typeName = nameNode[0].sym.name.s
 
         # Check pragma list for elixirModule
         let pragmaList = nameNode[1]
@@ -988,13 +994,6 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   let m = BModule(b)
   if m.module.isNil or sfMainModule notin m.module.flags:
     return n
-
-  # TEMPORARY TEST: Add File and String to test alias generation
-  # TODO: Remove this once pragma registration works
-  if "File" notin m.importedModules:
-    m.importedModules.add("File")
-  if "String" notin m.importedModules:
-    m.importedModules.add("String")
 
   case n.kind
   of nkStmtList:
