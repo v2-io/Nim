@@ -359,6 +359,16 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
     return newJNull()
 
   case n.kind
+  of nkIdent:
+    # Identifier before semantic analysis (or in type annotations)
+    # Just treat as a variable reference
+    let name = n.ident.s
+    if name == "true":
+      %* true
+    elif name == "false":
+      %* false
+    else:
+      varNode(name)
   of nkSym:
     if n.sym.isNil:
       %* "# sym"
@@ -731,6 +741,14 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     let tryExpr = elixirTuple(atom("try"), metaFromNode(m, node),
                              list(@[keyword(tryParts)]))
     result.add(tryExpr)
+  of nkTupleConstr, nkPar:
+    # Tuple/parenthesized expressions in statement context (e.g., return values)
+    result.add(translateExpr(m, node))
+  of nkIdent, nkSym, nkIntLit..nkInt64Lit, nkUIntLit..nkUInt64Lit,
+     nkFloatLit..nkFloat128Lit, nkStrLit, nkTripleStrLit, nkCharLit,
+     nkNilLit:
+    # Literal expressions in statement context
+    result.add(translateExpr(m, node))
   else:
     result.add(%* ("# unsupported node: " & $node.kind))
 
