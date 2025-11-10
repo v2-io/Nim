@@ -26,6 +26,9 @@ type
     forms: seq[JsonNode]
     moduleStmts: seq[JsonNode]  # Module-level statements for __sar_main__/0
     importedModules: seq[string]  # Elixir modules to alias (e.g., ["File", "Jason"])
+    useDirectives: seq[string]  # Elixir modules to use (e.g., ["GenServer"])
+    moduleAttributes: seq[(string, JsonNode)]  # Module attributes: (@moduledoc, value)
+    moduleConstants: seq[(string, JsonNode)]  # Module constants: (name, value)
 
   BModule = ref TElixirGen
 
@@ -1030,7 +1033,13 @@ proc genProc(m: BModule; procNode: PNode) =
   if procSym.isNil:
     return
 
+  # Check if this is a GenServer callback function
+  # If so, automatically add "use GenServer" to the module
   let procName = procSym.name.s
+  const genServerCallbacks = ["init", "handle_call", "handle_cast", "handle_info", "terminate", "code_change"]
+  if procName in genServerCallbacks:
+    if "GenServer" notin m.useDirectives:
+      m.useDirectives.add("GenServer")
   let paramsNode = procNode[paramsPos]
   var params: seq[JsonNode] = @[]
   for i in 1 ..< paramsNode.len:
@@ -1057,8 +1066,15 @@ proc moduleAst(m: BModule): JsonNode =
   let aliasList = aliasSegments(m.elixirModuleName).mapIt(atom(it))
   let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(aliasList))
 
-  # Generate alias statements for imported Elixir modules
+  # Build module forms in correct order:
+  # 1. alias statements
+  # 2. use directives
+  # 3. module attributes
+  # 4. module constants
+  # 5. functions and other forms
   var allForms: seq[JsonNode] = @[]
+
+  # 1. Generate alias statements for imported Elixir modules
   for moduleName in m.importedModules:
     # Generate: alias Elixir.ModuleName
     let elixirAlias = @[atom("Elixir"), atom(moduleName)]
@@ -1066,7 +1082,32 @@ proc moduleAst(m: BModule): JsonNode =
     let aliasStmt = elixirTuple(atom("alias"), emptyKeyword(), list(@[elixirAliasNode]))
     allForms.add(aliasStmt)
 
-  # Add the rest of the module forms (functions, etc.)
+  # 2. Generate use directives (e.g., use GenServer)
+  for useMod in m.useDirectives:
+    # Generate: use ModuleName
+    let modAlias = elixirTuple(atom("__aliases__"), emptyKeyword(), list(@[atom(useMod)]))
+    let useStmt = elixirTuple(atom("use"), emptyKeyword(), list(@[modAlias]))
+    allForms.add(useStmt)
+
+  # 3. Generate module attributes (@moduledoc, @doc, etc.)
+  for (attrName, attrValue) in m.moduleAttributes:
+    # Generate: @attribute_name value
+    let attrAtom = atom(attrName)
+    let attrStmt = elixirTuple(atom("@"), emptyKeyword(), list(@[
+      elixirTuple(attrAtom, emptyKeyword(), list(@[attrValue]))
+    ]))
+    allForms.add(attrStmt)
+
+  # 4. Generate module constants (@constant_name value)
+  for (constName, constValue) in m.moduleConstants:
+    # Generate: @constant_name value
+    let constAtom = atom(constName)
+    let constStmt = elixirTuple(atom("@"), emptyKeyword(), list(@[
+      elixirTuple(constAtom, emptyKeyword(), list(@[constValue]))
+    ]))
+    allForms.add(constStmt)
+
+  # 5. Add the rest of the module forms (functions, etc.)
   allForms.addAll(m.forms)
 
   let blockNode = makeBlock(allForms)
@@ -1115,6 +1156,9 @@ proc setupElixirgen*(graph: ModuleGraph; module: PSym; idgen: IdGenerator): PPas
   BModule(result).sourceDisplayPath = displayPath
   BModule(result).projectDir = projectDir
   BModule(result).importedModules = @[]  # Initialize empty list of imported modules
+  BModule(result).useDirectives = @[]  # Initialize empty list of use directives
+  BModule(result).moduleAttributes = @[]  # Initialize empty list of module attributes
+  BModule(result).moduleConstants = @[]  # Initialize empty list of module constants
 
 proc processTypeSection(m: BModule; typeSection: PNode) =
   ## Process type section to detect {.elixirModule.} pragma
@@ -1159,6 +1203,37 @@ proc processTypeSection(m: BModule; typeSection: PNode) =
         if typeName notin m.importedModules:
           m.importedModules.add(typeName)
 
+proc processConstSection(m: BModule; constSection: PNode) =
+  ## Process const section to extract module-level constants
+  ## Converts Nim const declarations to Elixir module attributes (@name value)
+  for constDef in constSection:
+    if constDef.kind == nkConstDef and constDef.len >= 3:
+      # constDef[0] is the const name
+      # constDef[1] is the type (may be empty)
+      # constDef[2] is the value
+
+      let nameNode = constDef[0]
+      let valueNode = constDef[2]
+
+      var constName = ""
+      if nameNode.kind == nkSym:
+        constName = nameNode.sym.name.s
+      elif nameNode.kind == nkIdent:
+        constName = nameNode.ident.s
+
+      if constName.len > 0 and valueNode.kind != nkEmpty:
+        # Translate the constant value to Elixir
+        let value = translateExpr(m, valueNode)
+        # Convert camelCase to snake_case for Elixir module attribute naming
+        var attrName = ""
+        for i, ch in constName:
+          if ch.isUpperAscii and i > 0:
+            attrName.add('_')
+            attrName.add(ch.toLowerAscii)
+          else:
+            attrName.add(ch.toLowerAscii)
+        m.moduleConstants.add((attrName, value))
+
 proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   if b.isNil:
     return n
@@ -1174,6 +1249,9 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
       elif child.kind == nkTypeSection:
         # Process type section to detect {.elixirModule.} pragmas
         processTypeSection(m, child)
+      elif child.kind == nkConstSection:
+        # Process const section to extract module-level constants
+        processConstSection(m, child)
       else:
         # Collect non-proc module-level statements for __sar_main__/0
         let stmts = translateStmt(m, child)
@@ -1183,6 +1261,9 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
   of nkTypeSection:
     # Process type section to detect {.elixirModule.} pragmas
     processTypeSection(m, n)
+  of nkConstSection:
+    # Process const section to extract module-level constants
+    processConstSection(m, n)
   else:
     # Collect non-proc module-level statements
     let stmts = translateStmt(m, n)
