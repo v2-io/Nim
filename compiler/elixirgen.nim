@@ -375,6 +375,31 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       remoteCallNode(m, "Map", "get", @[obj, fieldAtom], n)
     else:
       %* "# invalid dot expression"
+  of nkEmpty:
+    # Empty nodes should return null instead of unsupported warnings
+    newJNull()
+  of nkStmtListExpr:
+    # Statement list as expression (e.g., in let bindings or block returns)
+    # Last statement is the value, earlier statements are for side effects
+    var stmts: seq[JsonNode] = @[]
+    for child in n:
+      stmts.addAll(translateStmt(m, child))
+    makeBlock(stmts)
+  of nkBlockExpr, nkBlockStmt:
+    # Block expressions: block: stmts or block label: stmts → __block__
+    # Labels are ignored (Elixir doesn't have labeled blocks)
+    let bodyNode =
+      if n.len == 1:
+        # Unlabeled block: child[0] is body
+        n[0]
+      elif n.len == 2:
+        # Labeled block: child[0] is label, child[1] is body
+        n[1]
+      else:
+        # Shouldn't happen, but handle gracefully
+        n[n.len - 1]
+    let bodyStatements = translateStmt(m, bodyNode)
+    makeBlock(bodyStatements)
   of nkLambda, nkDo:
     # Anonymous function: proc(x: int): int = x + 1 → fn x -> x + 1 end
     let paramsNode = n[paramsPos]
@@ -420,6 +445,23 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
   of nkStmtList:
     for child in node:
       result.addAll(translateStmt(m, child))
+  of nkStmtListExpr:
+    # Statement list as expression in statement context (function bodies with blocks)
+    for child in node:
+      result.addAll(translateStmt(m, child))
+  of nkEmpty:
+    # Empty statements - do nothing
+    discard
+  of nkBlockExpr, nkBlockStmt:
+    # Block statements - translate body
+    let bodyNode =
+      if node.len == 1:
+        node[0]
+      elif node.len == 2:
+        node[1]  # Labeled block, skip label
+      else:
+        node[node.len - 1]
+    result.addAll(translateStmt(m, bodyNode))
   of nkAsgn:
     result.addAll(translateAssignment(m, node))
   of nkIfStmt:
