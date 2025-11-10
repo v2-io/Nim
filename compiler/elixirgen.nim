@@ -849,7 +849,94 @@ proc tryGenerateMultipleClauses(m: BModule; procNode: PNode): bool =
 
   return true
 
+proc getElixirPragma(procNode: PNode): string =
+  ## Check if proc has {.elixir: "Module.function".} pragma and return the value
+  ## Returns empty string if no elixir pragma found
+  if procNode.len <= pragmasPos:
+    return ""
+
+  let pragmaNode = procNode[pragmasPos]
+  if pragmaNode.kind == nkEmpty or pragmaNode.kind != nkPragma:
+    return ""
+
+  # Search through pragma list for "elixir" pragma
+  for pragma in pragmaNode:
+    if pragma.kind == nkExprColonExpr and pragma.len >= 2:
+      # pragma[0] is the pragma name, pragma[1] is the value
+      if pragma[0].kind == nkIdent and pragma[0].ident.s == "elixir":
+        # Extract string literal value
+        if pragma[1].kind == nkStrLit:
+          return pragma[1].strVal
+
+  return ""
+
+proc parseElixirCall(callSpec: string): (string, string) =
+  ## Parse "Module.function" into (module, function) tuple
+  ## e.g., "File.read!" → ("File", "read!")
+  let parts = callSpec.split('.')
+  if parts.len == 2:
+    return (parts[0], parts[1])
+  elif parts.len == 1:
+    return ("", parts[0])  # Just function name, no module
+  else:
+    # Handle multi-part modules like "Elixir.File.read!"
+    if parts.len > 2:
+      return (parts[0 .. ^2].join("."), parts[^1])
+    return ("", "")
+
+proc genElixirWrapperProc(m: BModule; procNode: PNode; elixirCall: string) =
+  ## Generate a wrapper function that calls an Elixir function
+  ## e.g., proc read_file(path: string): string {.elixir: "File.read!".}
+  ## becomes: def read_file(path), do: File.read!(path)
+
+  let procSym = procNode[namePos].sym
+  if procSym.isNil:
+    return
+
+  let procName = procSym.name.s
+
+  # Extract parameters
+  let paramsNode = procNode[paramsPos]
+  var params: seq[JsonNode] = @[]
+  var paramNames: seq[string] = @[]
+  for i in 1 ..< paramsNode.len:
+    let identDef = paramsNode[i]
+    if identDef.kind != nkIdentDefs:
+      continue
+    for child in identDef:
+      if child.kind == nkSym and child.sym.kind == skParam:
+        let paramName = child.sym.name.s
+        params.add(buildParam(paramName))
+        paramNames.add(paramName)
+
+  # Parse Elixir function call
+  let (moduleName, functionName) = parseElixirCall(elixirCall)
+
+  # Build the remote call: Module.function(args...)
+  var callArgs: seq[JsonNode] = @[]
+  for paramName in paramNames:
+    callArgs.add(buildParam(paramName))
+
+  let callNode = if moduleName.len > 0:
+    remoteCallNode(m, moduleName, functionName, callArgs, procNode)
+  else:
+    # Local function call (no module)
+    let fnAtom = atom(functionName)
+    elixirTuple(fnAtom, metaFromNode(m, procNode), list(callArgs))
+
+  # Generate: def procName(params), do: Module.function(params)
+  let fnHead = elixirTuple(atom(procName), emptyKeyword(), list(params))
+  let fnKeyword = keyword(@[("do", callNode)])
+  let defNode = elixirTuple(atom("def"), metaFromNode(m, procNode), list(@[fnHead, fnKeyword]))
+  m.forms.add(defNode)
+
 proc genProc(m: BModule; procNode: PNode) =
+  # Check for {.elixir: "Module.function".} pragma first
+  let elixirCall = getElixirPragma(procNode)
+  if elixirCall.len > 0:
+    genElixirWrapperProc(m, procNode, elixirCall)
+    return  # Wrapper generated, we're done
+
   # Try to generate multiple clauses from case-on-parameter pattern
   if tryGenerateMultipleClauses(m, procNode):
     return  # Multiple clauses generated, we're done
