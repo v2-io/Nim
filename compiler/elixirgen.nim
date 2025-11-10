@@ -24,6 +24,7 @@ type
     sourceDisplayPath: string
     projectDir: string
     forms: seq[JsonNode]
+    moduleStmts: seq[JsonNode]  # Module-level statements for __sar_main__/0
 
   BModule = ref TElixirGen
 
@@ -158,26 +159,47 @@ proc translateIfExpr(m: BModule; node: PNode): JsonNode =
   if node.len == 0:
     return %* "# unsupported empty if"
 
-  let firstBranch = node[0]
-  if firstBranch.kind != nkElifBranch or firstBranch.len < 2:
-    return %* "# unsupported if structure"
+  # Handle if/elif/else chains by nesting them
+  proc buildIfChain(branches: seq[PNode]; startIdx: int): JsonNode =
+    if startIdx >= branches.len:
+      return newJNull()
 
-  let condition = translateExpr(m, firstBranch[0])
-  var thenStmts: seq[JsonNode] = @[]
-  for i in 1 ..< firstBranch.len:
-    thenStmts.addAll(translateStmt(m, firstBranch[i]))
+    let branch = branches[startIdx]
 
-  var elseStmts: seq[JsonNode] = @[]
-  for branch in node:
-    if branch.kind == nkElse:
+    if branch.kind == nkElifBranch and branch.len >= 2:
+      # elif or initial if branch
+      let condition = translateExpr(m, branch[0])
+      var thenStmts: seq[JsonNode] = @[]
+      for i in 1 ..< branch.len:
+        thenStmts.addAll(translateStmt(m, branch[i]))
+
+      # Check if there are more branches
+      let restChain = buildIfChain(branches, startIdx + 1)
+      var clauses: seq[(string, JsonNode)] = @[("do", makeBlock(thenStmts))]
+      if not restChain.isNil and restChain.kind != JNull:
+        clauses.add(("else", restChain))
+
+      elixirTuple(atom("if"), metaFromNode(m, branch), list(@[condition, keyword(clauses)]))
+
+    elif branch.kind == nkElse:
+      # else branch - return the block directly
+      var elseStmts: seq[JsonNode] = @[]
       for child in branch:
         elseStmts.addAll(translateStmt(m, child))
+      makeBlock(elseStmts)
+    else:
+      newJNull()
 
-  var clauses: seq[(string, JsonNode)] = @[("do", makeBlock(thenStmts))]
-  if elseStmts.len > 0:
-    clauses.add(("else", makeBlock(elseStmts)))
+  var branches: seq[PNode] = @[]
+  for i in 0 ..< node.len:
+    branches.add(node[i])
 
-  elixirTuple(atom("if"), metaFromNode(m, node), list(@[condition, keyword(clauses)]))
+  buildIfChain(branches, 0)
+
+proc remoteCallNode(m: BModule; moduleName, funcName: string; args: seq[JsonNode]; origin: PNode): JsonNode =
+  let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(@[atom(moduleName)]))
+  let dotNode = elixirTuple(atom("."), emptyKeyword(), list(@[aliasNode, atom(funcName)]))
+  elixirTuple(dotNode, metaFromNode(m, origin), list(args))
 
 proc translateCall(m: BModule; n: PNode): JsonNode =
   if n.len == 0 or n[0].kind != nkSym or n[0].sym.isNil:
@@ -186,7 +208,47 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
   let name = n[0].sym.name.s
   var args: seq[JsonNode] = @[]
   for i in 1 ..< n.len:
-    args.add(translateExpr(m, n[i]))
+    # Flatten varargs (nkBracket) nodes
+    if n[i].kind == nkBracket:
+      for child in n[i]:
+        args.add(translateExpr(m, child))
+    else:
+      args.add(translateExpr(m, n[i]))
+
+  # Handle special commands
+  case name
+  of "echo":
+    # echo maps to IO.puts with string coalescing
+    if args.len == 0:
+      return remoteCallNode(m, "IO", "puts", @[%* ""], n)
+    elif args.len == 1:
+      return remoteCallNode(m, "IO", "puts", args, n)
+    else:
+      # Multiple args: coalesce with Kernel.to_string
+      var coalesced: seq[JsonNode] = @[]
+      for arg in args:
+        let toString = remoteCallNode(m, "Kernel", "to_string", @[arg], n)
+        coalesced.add(toString)
+      # Build string concatenation
+      var result = coalesced[0]
+      for i in 1 ..< coalesced.len:
+        result = opNode(m, "<>", @[result, coalesced[i]], n)
+      return remoteCallNode(m, "IO", "puts", @[result], n)
+  of "inc":
+    # inc(x, step) -> x = x + step
+    if args.len >= 1:
+      let target = args[0]
+      let step = if args.len >= 2: args[1] else: %* 1
+      return opNode(m, "=", @[target, opNode(m, "+", @[target, step], n)], n)
+  of "dec":
+    # dec(x, step) -> x = x - step
+    if args.len >= 1:
+      let target = args[0]
+      let step = if args.len >= 2: args[1] else: %* 1
+      return opNode(m, "=", @[target, opNode(m, "-", @[target, step], n)], n)
+  else:
+    discard
+
   callNode(m, name, args, n)
 
 proc translateInfix(m: BModule; n: PNode): JsonNode =
@@ -234,12 +296,24 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
     newJNull()
   of nkInfix:
     translateInfix(m, n)
-  of nkCall:
+  of nkCall, nkCommand:
+    # nkCommand is like nkCall but for statements at module level
     translateCall(m, n)
   of nkIfExpr, nkIfStmt:
     translateIfExpr(m, n)
   of nkPar, nkExprEqExpr, nkHiddenAddr, nkHiddenDeref:
     if n.len > 0: translateExpr(m, n[0]) else: %* "# empty"
+  of nkHiddenStdConv, nkHiddenCallConv:
+    # Hidden conversions: child[0] is calling convention, child[1] is the actual expression
+    if n.len > 1: translateExpr(m, n[1])
+    elif n.len > 0: translateExpr(m, n[0])
+    else: %* "# empty"
+  of nkBracket:
+    # List literal [a, b, c] → Elixir list
+    var elements: seq[JsonNode] = @[]
+    for child in n:
+      elements.add(translateExpr(m, child))
+    list(elements)
   else:
     %* ("# unsupported " & $n.kind)
 
@@ -271,6 +345,66 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     result.addAll(translateAssignment(m, node))
   of nkIfStmt:
     result.add(translateIfExpr(m, node))
+  of nkCall, nkCommand:
+    # Commands and calls at statement level
+    result.add(translateCall(m, node))
+  of nkLetSection, nkVarSection:
+    # Handle let/var bindings: let x = 5 or var y = 10
+    for child in node:
+      if child.kind == nkIdentDefs and child.len >= 3:
+        # child[0] is the identifier, child[^2] is the type, child[^1] is the value
+        let nameNode = child[0]
+        let valueNode = child[^1]
+        if nameNode.kind == nkSym and not nameNode.sym.isNil:
+          let varName = nameNode.sym.name.s
+          let value = translateExpr(m, valueNode)
+          result.add(opNode(m, "=", @[varNode(varName), value], child))
+  of nkReturnStmt:
+    # Explicit return statement
+    if node.len > 0 and node[0].kind != nkEmpty:
+      result.add(translateExpr(m, node[0]))
+  of nkCaseStmt:
+    # Case statement: case x of 0: ... of 1: ... else: ...
+    if node.len < 2:
+      result.add(%* "# unsupported case")
+    else:
+      let selector = translateExpr(m, node[0])
+      var clauses: seq[JsonNode] = @[]
+
+      for i in 1 ..< node.len:
+        let branch = node[i]
+        case branch.kind
+        of nkOfBranch:
+          # Pattern branch: of value: body
+          if branch.len >= 2:
+            # branch[0..<^1] are patterns, branch[^1] is body
+            for j in 0 ..< branch.len - 1:
+              let pattern = translateExpr(m, branch[j])
+              var bodyStmts: seq[JsonNode] = @[]
+              bodyStmts.addAll(translateStmt(m, branch[^1]))
+              let arrow = elixirTuple(atom("->"), emptyKeyword(),
+                                     list(@[list(@[pattern]), makeBlock(bodyStmts)]))
+              clauses.add(arrow)
+        of nkElse:
+          # Else branch with catch-all pattern
+          var bodyStmts: seq[JsonNode] = @[]
+          for child in branch:
+            bodyStmts.addAll(translateStmt(m, child))
+          let catchAll = varNode("_")
+          let arrow = elixirTuple(atom("->"), emptyKeyword(),
+                                 list(@[list(@[catchAll]), makeBlock(bodyStmts)]))
+          clauses.add(arrow)
+        else:
+          discard
+
+      let caseNode = elixirTuple(atom("case"), metaFromNode(m, node),
+                                list(@[selector, keyword(@[("do", list(clauses))])]))
+      result.add(caseNode)
+  of nkWhileStmt:
+    # While loops are NOT SUPPORTED in Elixir backend
+    # Reason: Elixir's immutable variables break closure-based while loop helpers
+    # Workaround: Use recursion or Enum functions instead
+    result.add(%* "# ERROR: while loops not supported - use recursion or Enum functions")
   of nkCommentStmt:
     discard
   else:
@@ -371,10 +505,16 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
     for child in n:
       if child.kind == nkProcDef:
         genProc(m, child)
+      else:
+        # Collect non-proc module-level statements for __sar_main__/0
+        let stmts = translateStmt(m, child)
+        m.moduleStmts.addAll(stmts)
   of nkProcDef:
     genProc(m, n)
   else:
-    discard
+    # Collect non-proc module-level statements
+    let stmts = translateStmt(m, n)
+    m.moduleStmts.addAll(stmts)
   result = n
 
 proc finalElixirCodeGen*(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
@@ -388,6 +528,14 @@ proc finalElixirCodeGen*(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
 
   if pipelineutils.skipCodegen(m.config, n):
     return n
+
+  # Generate __sar_main__/0 if there are module-level statements
+  if m.moduleStmts.len > 0:
+    let blockNode = makeBlock(m.moduleStmts)
+    let fnHead = elixirTuple(atom("__sar_main__"), emptyKeyword(), list(@[]))
+    let fnKeyword = keyword(@[("do", blockNode)])
+    let defNode = elixirTuple(atom("def"), emptyKeyword(), list(@[fnHead, fnKeyword]))
+    m.forms.add(defNode)
 
   if m.forms.len == 0:
     m.forms.add(%* "# module has no translated procedures")
