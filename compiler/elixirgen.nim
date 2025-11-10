@@ -341,6 +341,40 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       if child.kind != nkEmpty:
         elements.add(translateExpr(m, child))
     elixirTuple(atom("{}"), metaFromNode(m, n), list(elements))
+  of nkObjConstr:
+    # Object construction → Elixir map: Point(x: 1, y: 2) → %{x: 1, y: 2}
+    var pairs: seq[(string, JsonNode)] = @[]
+    # First child is the type, rest are field assignments
+    for i in 1 ..< n.len:
+      let fieldNode = n[i]
+      if fieldNode.kind == nkExprColonExpr and fieldNode.len >= 2:
+        let fieldName =
+          if fieldNode[0].kind == nkSym and not fieldNode[0].sym.isNil:
+            fieldNode[0].sym.name.s
+          else:
+            "field"
+        let fieldValue = translateExpr(m, fieldNode[1])
+        pairs.add((fieldName, fieldValue))
+    # Generate %{...} map structure
+    var mapPairs: seq[JsonNode] = @[]
+    for (key, value) in pairs:
+      let keyAtom = atom(key)
+      let pairTuple = elixirTuple(keyAtom, value)
+      mapPairs.add(pairTuple)
+    elixirTuple(atom("%{}"), metaFromNode(m, n), list(mapPairs))
+  of nkDotExpr:
+    # Field access: obj.field → Map.get(obj, :field)
+    if n.len >= 2:
+      let obj = translateExpr(m, n[0])
+      let fieldName =
+        if n[1].kind == nkSym and not n[1].sym.isNil:
+          n[1].sym.name.s
+        else:
+          "field"
+      let fieldAtom = atom(fieldName)
+      remoteCallNode(m, "Map", "get", @[obj, fieldAtom], n)
+    else:
+      %* "# invalid dot expression"
   else:
     %* ("# unsupported " & $n.kind)
 
