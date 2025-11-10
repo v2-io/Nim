@@ -279,6 +279,26 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
   of "low":
     # low(arr) -> 0
     return %* 0
+  of "sarAssert":
+    # sarAssert(cond) → if not(cond), do: raise "Assertion failed"
+    if args.len >= 1:
+      let condition = args[0]
+      let negatedCond = elixirTuple(atom("not"), metaFromNode(m, n), list(@[condition]))
+      let raiseCall = remoteCallNode(m, "Kernel", "raise", @[%* "Assertion failed"], n)
+      let ifKeyword = keyword(@[("do", raiseCall)])
+      return elixirTuple(atom("if"), metaFromNode(m, n), list(@[negatedCond, ifKeyword]))
+  of "sarAssertMsg":
+    # sarAssertMsg(cond, msg) → if not(cond), do: raise "Assertion failed: #{msg}"
+    if args.len >= 2:
+      let condition = args[0]
+      let message = args[1]
+      let negatedCond = elixirTuple(atom("not"), metaFromNode(m, n), list(@[condition]))
+      # Create interpolated string: "Assertion failed: " <> msg
+      let prefix = %* "Assertion failed: "
+      let interpolated = opNode(m, "<>", @[prefix, message], n)
+      let raiseCall = remoteCallNode(m, "Kernel", "raise", @[interpolated], n)
+      let ifKeyword = keyword(@[("do", raiseCall)])
+      return elixirTuple(atom("if"), metaFromNode(m, n), list(@[negatedCond, ifKeyword]))
   else:
     # Check if this is a built-in function
     let (modName, funcName) = mapBuiltinFunction(name)
