@@ -214,6 +214,15 @@ proc mapBuiltinFunction(name: string): (string, string) =
   of "max": ("Kernel", "max")
   of "abs": ("Kernel", "abs")
   of "contains": ("Enum", "member?")
+  # String operations
+  of "toUpperAscii", "toUpper": ("String", "upcase")
+  of "toLowerAscii", "toLower": ("String", "downcase")
+  of "strip": ("String", "trim")
+  of "startsWith": ("String", "starts_with?")
+  of "endsWith": ("String", "ends_with?")
+  of "split": ("String", "split")
+  of "join": ("Enum", "join")
+  of "replace": ("String", "replace")
   # Special cases high/low handled separately in translateCall
   else: ("", "")
 
@@ -274,7 +283,30 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
     # Check if this is a built-in function
     let (modName, funcName) = mapBuiltinFunction(name)
     if modName.len > 0:
-      return remoteCallNode(m, modName, funcName, args, n)
+      # Filter arguments for functions that need it
+      # Nim passes default parameter values that Elixir functions don't accept
+      var filteredArgs = args
+      if modName == "String":
+        case funcName
+        of "trim", "upcase", "downcase":
+          # Only pass the string argument
+          if args.len > 0:
+            filteredArgs = @[args[0]]
+        of "starts_with?", "ends_with?", "split":
+          # Pass first 2 arguments (string, pattern/suffix/delimiter)
+          if args.len > 1:
+            filteredArgs = @[args[0], args[1]]
+        of "replace":
+          # Pass first 3 arguments (string, old, new)
+          if args.len > 2:
+            filteredArgs = @[args[0], args[1], args[2]]
+        else:
+          discard
+      elif modName == "Enum" and funcName == "join":
+        # join takes (list, separator)
+        if args.len > 1:
+          filteredArgs = @[args[0], args[1]]
+      return remoteCallNode(m, modName, funcName, filteredArgs, n)
 
   callNode(m, name, args, n)
 
