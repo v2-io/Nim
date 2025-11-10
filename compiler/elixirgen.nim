@@ -205,6 +205,18 @@ proc remoteCallNode(m: BModule; moduleName, funcName: string; args: seq[JsonNode
   let dotNode = elixirTuple(atom("."), emptyKeyword(), list(@[aliasNode, atom(funcName)]))
   elixirTuple(dotNode, metaFromNode(m, origin), list(args))
 
+proc mapBuiltinFunction(name: string): (string, string) =
+  ## Maps Nim built-in function names to (module, function) pairs
+  ## Returns ("", "") if not a built-in
+  case name
+  of "len": ("Kernel", "length")
+  of "min": ("Kernel", "min")
+  of "max": ("Kernel", "max")
+  of "abs": ("Kernel", "abs")
+  of "contains": ("Enum", "member?")
+  # Special cases high/low handled separately in translateCall
+  else: ("", "")
+
 proc translateCall(m: BModule; n: PNode): JsonNode =
   if n.len == 0 or n[0].kind != nkSym or n[0].sym.isNil:
     return %* "# unsupported call"
@@ -250,8 +262,19 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
       let target = args[0]
       let step = if args.len >= 2: args[1] else: %* 1
       return opNode(m, "=", @[target, opNode(m, "-", @[target, step], n)], n)
+  of "high":
+    # high(arr) -> length(arr) - 1
+    if args.len >= 1:
+      let lengthCall = remoteCallNode(m, "Kernel", "length", @[args[0]], n)
+      return opNode(m, "-", @[lengthCall, %* 1], n)
+  of "low":
+    # low(arr) -> 0
+    return %* 0
   else:
-    discard
+    # Check if this is a built-in function
+    let (modName, funcName) = mapBuiltinFunction(name)
+    if modName.len > 0:
+      return remoteCallNode(m, modName, funcName, args, n)
 
   callNode(m, name, args, n)
 
