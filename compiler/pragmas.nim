@@ -1189,8 +1189,9 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         result = true
       of wReceiveBlock:
         # Receive block pragma - marks a case statement as a receive block
-        # Has a value (timeout in milliseconds), processed by Elixir backend
-        discard expectIntLit(c, it)  # Validate timeout is an integer
+        # Has a value (timeout in milliseconds - can be literal or expression)
+        # Backend extracts and translates the timeout expression
+        # Don't validate here - let backend handle any expression
         result = true
       of wPragma:
         if not sym.isNil and sym.kind == skTemplate:

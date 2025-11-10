@@ -846,17 +846,16 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
 
       # Check for receiveBlock pragma
       var isReceiveBlock = false
-      var timeout: int = -1  # -1 means infinite
+      var timeoutExpr: JsonNode = nil  # Timeout expression (can be literal or variable)
 
       if pragmas.kind == nkPragma:
         for pragma in pragmas:
-          # Look for receiveBlock: N pattern (nkExprColonExpr)
+          # Look for receiveBlock: expr pattern (nkExprColonExpr)
           if pragma.kind == nkExprColonExpr and pragma.len == 2:
             if pragma[0].kind == nkIdent and pragma[0].ident.s == "receiveBlock":
               isReceiveBlock = true
-              # Extract timeout value
-              if pragma[1].kind == nkIntLit:
-                timeout = pragma[1].intVal.int
+              # Extract timeout expression (can be literal or any expression)
+              timeoutExpr = translateExpr(m, pragma[1])
 
       if isReceiveBlock and stmt.kind == nkCaseStmt:
         # Generate Elixir receive block instead of case
@@ -892,11 +891,11 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
           # Build receive block
           var receiveKw: seq[(string, JsonNode)] = @[("do", list(clauses))]
 
-          # Add after clause if timeout >= 0
-          if timeout >= 0 and not afterClause.isNil:
-            # after timeout -> body
+          # Add after clause if timeout expression provided
+          if not timeoutExpr.isNil and not afterClause.isNil:
+            # after timeout_expr -> body
             let afterArrow = elixirTuple(atom("->"), emptyKeyword(),
-                                        list(@[list(@[%* timeout]), afterClause]))
+                                        list(@[list(@[timeoutExpr]), afterClause]))
             receiveKw.add(("after", list(@[afterArrow])))
 
           let receiveNode = elixirTuple(atom("receive"), metaFromNode(m, stmt),
