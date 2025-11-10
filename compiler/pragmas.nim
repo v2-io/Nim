@@ -51,7 +51,7 @@ const
     wMagic, wBorrow,
     wDiscardable, wGensym, wInject, wRaises, wEffectsOf,
     wTags, wForbids, wLocks, wGcSafe, wRequires, wEnsures}
-  exprPragmas* = {wLine, wLocks, wNoRewrite, wGcSafe, wNoSideEffect}
+  exprPragmas* = {wLine, wLocks, wNoRewrite, wGcSafe, wNoSideEffect, wReceiveBlock}
   stmtPragmas* = {
     wHint, wWarning, wError,
     wFatal, wDefine, wUndef, wCompile, wLink, wLinksys, wPure, wPush, wPop,
