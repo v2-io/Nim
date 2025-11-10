@@ -278,6 +278,13 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         %* true
       elif name == "false":
         %* false
+      elif n.sym.kind == skEnumField:
+        # Enum field → atom (strip "atom" prefix)
+        if name.startsWith("atom") and name.len > 4:
+          let atomName = name[4..^1].toLowerAscii
+          atom(atomName)
+        else:
+          atom(name.toLowerAscii)
       else:
         varNode(name)
   of nkIntLit..nkInt64Lit:
