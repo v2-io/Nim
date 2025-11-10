@@ -350,6 +350,8 @@ proc translateInfix(m: BModule; n: PNode): JsonNode =
   var opName = "+"
   if n[0].kind == nkSym and not n[0].sym.isNil:
     opName = mapOperator(n[0].sym.name.s)
+  elif n[0].kind == nkIdent:
+    opName = mapOperator(n[0].ident.s)
   else:
     opName = "+"
   opNode(m, opName, @[left, right], n)
