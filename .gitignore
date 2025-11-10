@@ -112,3 +112,6 @@ nimdoc.out.css
 !/nimdoc/testproject/expected/*
 pkgs/
 /compiler/compiler/
+
+
+/tmp/
