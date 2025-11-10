@@ -1187,6 +1187,11 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         # They are processed by the Elixir backend, not during semantic analysis
         noVal(c, it)
         result = true
+      of wReceiveBlock:
+        # Receive block pragma - marks a case statement as a receive block
+        # Has a value (timeout in milliseconds), processed by Elixir backend
+        discard expectIntLit(c, it)  # Validate timeout is an integer
+        result = true
       of wPragma:
         if not sym.isNil and sym.kind == skTemplate:
           sym.flags.incl sfCustomPragma
@@ -1349,11 +1354,6 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         # Marker pragma for Elixir external procs - handled by elixirgen backend
         # Value is the Elixir function name (e.g., "File.read!")
         discard getOptionalStr(c, it, "")
-      of wReceiveBlock:
-        # Marker pragma for receive blocks - handled by elixirgen backend
-        # Value is the timeout in milliseconds (e.g., 5000 for 5 seconds, -1 for infinite)
-        # Backend extracts value directly from AST, so we just validate it exists
-        discard
 
       else: invalidPragma(c, it)
     elif comesFromPush and whichKeyword(ident) != wInvalid:
