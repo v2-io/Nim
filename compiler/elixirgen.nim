@@ -171,7 +171,7 @@ proc translateIfExpr(m: BModule; node: PNode): JsonNode =
 
     let branch = branches[startIdx]
 
-    if branch.kind == nkElifBranch and branch.len >= 2:
+    if branch.kind in {nkElifBranch, nkElifExpr} and branch.len >= 2:
       # elif or initial if branch
       let condition = translateExpr(m, branch[0])
       var thenStmts: seq[JsonNode] = @[]
@@ -186,7 +186,7 @@ proc translateIfExpr(m: BModule; node: PNode): JsonNode =
 
       elixirTuple(atom("if"), metaFromNode(m, branch), list(@[condition, keyword(clauses)]))
 
-    elif branch.kind == nkElse:
+    elif branch.kind in {nkElse, nkElseExpr}:
       # else branch - return the block directly
       var elseStmts: seq[JsonNode] = @[]
       for child in branch:
