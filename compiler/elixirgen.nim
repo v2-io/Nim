@@ -235,6 +235,34 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
     return %* "# unsupported call"
 
   let name = n[0].sym.name.s
+
+  # Check if this is REMOTE_CALL_MARKER(actualCall)
+  # This is injected by the MODULE() macro for explicit remote calls
+  if name == "REMOTE_CALL_MARKER":
+    if n.len >= 2:
+      let wrappedCall = n[1]
+      # The wrapped call should be the actual function call
+      if wrappedCall.kind in {nkCall, nkCommand}:
+        if wrappedCall.len > 0 and wrappedCall[0].kind == nkSym and not wrappedCall[0].sym.isNil:
+          let funcName = wrappedCall[0].sym.name.s
+          let currentModuleName = m.module.name.s
+          # Convert snake_case to PascalCase (test_module_macro -> TestModuleMacro)
+          var elixirModuleName = ""
+          var capitalizeNext = true
+          for ch in currentModuleName:
+            if ch == '_':
+              capitalizeNext = true
+            else:
+              if capitalizeNext:
+                elixirModuleName.add(ch.toUpperAscii)
+                capitalizeNext = false
+              else:
+                elixirModuleName.add(ch)
+          # Collect arguments from the wrapped call
+          var args: seq[JsonNode] = @[]
+          for i in 1 ..< wrappedCall.len:
+            args.add(translateExpr(m, wrappedCall[i]))
+          return remoteCallNode(m, elixirModuleName, funcName, args, n)
   var args: seq[JsonNode] = @[]
   for i in 1 ..< n.len:
     # Flatten varargs (nkBracket) nodes, including when wrapped in nkHiddenStdConv
@@ -422,6 +450,33 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
   of nkCall, nkCommand:
     # nkCommand is like nkCall but for statements at module level
     translateCall(m, n)
+  of nkPragmaExpr:
+    # Expression with pragma: expr {.pragma.}
+    # Check if it's a call with {.remote.} pragma
+    if n.len >= 2:
+      let expr = n[0]  # The expression (should be a call)
+      let pragmas = n[1]  # The pragma list
+      # Check for remote pragma
+      if pragmas.kind == nkPragma:
+        for pragma in pragmas:
+          if pragma.kind == nkIdent and pragma.ident.s == "remote":
+            # This is a remote call!
+            if expr.kind in {nkCall, nkCommand}:
+              # Generate remote call to current module
+              if expr.len > 0 and expr[0].kind == nkSym and not expr[0].sym.isNil:
+                let funcName = expr[0].sym.name.s
+                let currentModuleName = m.module.name.s
+                let elixirModuleName = currentModuleName[0].toUpperAscii & currentModuleName[1..^1]
+                # Collect arguments
+                var args: seq[JsonNode] = @[]
+                for i in 1 ..< expr.len:
+                  args.add(translateExpr(m, expr[i]))
+                return remoteCallNode(m, elixirModuleName, funcName, args, n)
+      # No remote pragma, just translate the expression
+      return translateExpr(m, expr)
+    else:
+      # Malformed pragma expression
+      return %* "# unsupported pragma expr"
   of nkIfExpr, nkIfStmt:
     translateIfExpr(m, n)
   of nkPar:
