@@ -352,6 +352,10 @@ proc translateInfix(m: BModule; n: PNode): JsonNode =
     opName = mapOperator(n[0].sym.name.s)
   elif n[0].kind == nkIdent:
     opName = mapOperator(n[0].ident.s)
+  elif n[0].kind == nkOpenSymChoice:
+    # Overloaded operator before resolution - use first choice
+    if n[0].len > 0 and not n[0][0].sym.isNil:
+      opName = mapOperator(n[0][0].sym.name.s)
   else:
     opName = "+"
   opNode(m, opName, @[left, right], n)
