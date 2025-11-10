@@ -835,8 +835,7 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
               if importNode[1].kind == nkIdent and importNode[1].ident.s == "Elixir":
                 if moduleName notin m.importedModules:
                   m.importedModules.add(moduleName)
-      # For now, emit comment in generated code (imports handled via alias)
-      result.add(%* ("# import processed: " & $importNode.kind))
+    # Import statements don't generate output - handled via alias generation in moduleAst
   of nkPragmaBlock:
     # Pragma block: {.pragma.} statement
     # Used for receive blocks: {.receiveBlock: timeout.} case RECEIVE_MARKER: ...
