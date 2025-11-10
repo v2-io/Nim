@@ -1120,6 +1120,14 @@ proc genProc(m: BModule; procNode: PNode) =
     genElixirWrapperProc(m, procNode, elixirCall)
     return  # Wrapper generated, we're done
 
+  # Skip forward declarations (procs with no body)
+  # Forward declarations in Nim are used for mutual recursion, but Elixir doesn't need them
+  if procNode.len > bodyPos:
+    let bodyNode = procNode[bodyPos]
+    if bodyNode.kind == nkEmpty:
+      # This is a forward declaration - skip it
+      return
+
   # Try to generate multiple clauses from case-on-parameter pattern
   if tryGenerateMultipleClauses(m, procNode):
     return  # Multiple clauses generated, we're done
