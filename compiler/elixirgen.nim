@@ -1034,14 +1034,19 @@ proc genProc(m: BModule; procNode: PNode) =
     return
 
   # Check if this is a GenServer callback function
-  # If so, automatically add "use GenServer" to the module
+  # If so, add @impl true (if GenServer is used in this module)
   let procName = procSym.name.s
   const genServerCallbacks = ["init", "handle_call", "handle_cast", "handle_info", "terminate", "code_change"]
-  var isGenServerCallback = false
-  if procName in genServerCallbacks:
-    if "GenServer" notin m.useDirectives:
-      m.useDirectives.add("GenServer")
-    isGenServerCallback = true
+  const supervisorCallbacks = ["init"]  # Overlaps with GenServer
+  const applicationCallbacks = ["start", "stop"]
+
+  var isCallback = false
+  if procName in genServerCallbacks and "GenServer" in m.useDirectives:
+    isCallback = true
+  elif procName in supervisorCallbacks and "Supervisor" in m.useDirectives:
+    isCallback = true
+  elif procName in applicationCallbacks and "Application" in m.useDirectives:
+    isCallback = true
 
   # Check for doc comment on proc node
   let docComment = procNode.comment
@@ -1053,8 +1058,8 @@ proc genProc(m: BModule; procNode: PNode) =
     ]))
     m.forms.add(docAttr)
 
-  # Add @impl true for GenServer callbacks
-  if isGenServerCallback:
+  # Add @impl true for behavior callbacks
+  if isCallback:
     let implAttr = elixirTuple(atom("@"), emptyKeyword(), list(@[
       elixirTuple(atom("impl"), emptyKeyword(), list(@[%* true]))
     ]))
@@ -1285,6 +1290,19 @@ proc processElixirCodeGen*(b: PPassContext, n: PNode): PNode =
       elif child.kind == nkConstSection:
         # Process const section to extract module-level constants
         processConstSection(m, child)
+      elif child.kind == nkPragma:
+        # Statement-level pragma (e.g., {.genserver.})
+        # Check for behavior-declaration pragmas
+        for pragmaNode in child:
+          if pragmaNode.kind == nkIdent:
+            let pragmaName = pragmaNode.ident.s
+            # Check for behavior pragmas
+            if pragmaName == "genserver" and "GenServer" notin m.useDirectives:
+              m.useDirectives.add("GenServer")
+            elif pragmaName == "supervisor" and "Supervisor" notin m.useDirectives:
+              m.useDirectives.add("Supervisor")
+            elif pragmaName == "application" and "Application" notin m.useDirectives:
+              m.useDirectives.add("Application")
       elif child.kind == nkCommentStmt and m.moduleAttributes.len == 0:
         # If this is the first thing in the module and it's a comment, use it as @moduledoc
         let commentText = child.comment

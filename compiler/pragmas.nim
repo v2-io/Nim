@@ -60,7 +60,8 @@ const
     wDeprecated,
     wPragma, wEmit, wUnroll,
     wLinearScanEnd, wPatterns, wTrMacros, wEffects, wNoForward, wReorder, wComputedGoto,
-    wExperimental, wDoctype, wThis, wUsed, wInvariant, wAssume, wAssert}
+    wExperimental, wDoctype, wThis, wUsed, wInvariant, wAssume, wAssert,
+    wGenServer, wSupervisor, wApplication, wGenStateMachine, wGenStage}
   stmtPragmasTopLevel* = {wChecks, wObjChecks, wFieldChecks, wRangeChecks,
     wBoundChecks, wOverflowChecks, wNilChecks, wStaticBoundchecks,
     wStyleChecks, wAssertions,
@@ -1179,6 +1180,12 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
         result = true
       of wPop:
         processPop(c, it)
+        result = true
+      of wGenServer, wSupervisor, wApplication, wGenStateMachine, wGenStage:
+        # OTP behavior pragmas - these are statement-level pragmas that mark a module
+        # as implementing a specific OTP behavior (GenServer, Supervisor, etc.)
+        # They are processed by the Elixir backend, not during semantic analysis
+        noVal(c, it)
         result = true
       of wPragma:
         if not sym.isNil and sym.kind == skTemplate:

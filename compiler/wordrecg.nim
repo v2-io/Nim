@@ -46,6 +46,8 @@ type
     wImportc = "importc", wImportJs = "importjs", wExportc = "exportc", wExportCpp = "exportcpp",
     wExportNims = "exportnims",
     wElixirModule = "elixirModule", wElixir = "elixir",
+    wGenServer = "genserver", wSupervisor = "supervisor", wApplication = "application",
+    wGenStateMachine = "genstatemachine", wGenStage = "genstage",
     wIncompleteStruct = "incompleteStruct", # deprecated
     wCompleteStruct = "completeStruct", wRequiresInit = "requiresInit", wAlign = "align",
     wNodecl = "nodecl", wPure = "pure", wSideEffect = "sideEffect", wHeader = "header",
