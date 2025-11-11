@@ -316,14 +316,11 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
               # If it's a string literal, convert directly to atom
               if firstArg.kind == JString:
                 processedArgs = @[atom(firstArg.getStr())] & args[1..^1]
-              else:
-                # For non-literal expressions (variables, function calls, etc.),
-                # wrap with String.to_existing_atom/1 for runtime conversion
-                # This is safer than String.to_atom/1 as it prevents atom table exhaustion
-                let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(@[atom("String")]))
-                let dotNode = elixirTuple(atom("."), emptyKeyword(), list(@[aliasNode, atom("to_existing_atom")]))
-                let toAtomCall = elixirTuple(dotNode, emptyKeyword(), list(@[firstArg]))
-                processedArgs = @[toAtomCall] & args[1..^1]
+              # For non-literal expressions (variables, function calls, etc.),
+              # pass through as-is. The caller is responsible for providing a
+              # valid server reference (PID, atom, {:via, Registry, ...}, etc.).
+              # This allows dynamic registration and avoids forcing String.to_existing_atom/1
+              # which breaks PIDs, via tuples, and other valid server references.
 
         if moduleName.len > 0:
           # Module.function call
