@@ -167,7 +167,8 @@ proc parseElixirCall(callSpec: string): (string, string)
 
 proc translateIfExpr(m: BModule; node: PNode): JsonNode =
   if node.len == 0:
-    return %* "# unsupported empty if"
+    localError(m.config, node.info, "empty if expression not supported")
+    return newJNull()
 
   # Handle if/elif/else chains by nesting them
   proc buildIfChain(branches: seq[PNode]; startIdx: int): JsonNode =
@@ -239,7 +240,8 @@ proc mapBuiltinFunction(name: string): (string, string) =
 
 proc translateCall(m: BModule; n: PNode): JsonNode =
   if n.len == 0 or n[0].kind != nkSym or n[0].sym.isNil:
-    return %* "# unsupported call"
+    localError(m.config, n.info, "malformed call expression (missing symbol information)")
+    return newJNull()
 
   let name = n[0].sym.name.s
 
@@ -442,7 +444,8 @@ proc translateCall(m: BModule; n: PNode): JsonNode =
 
 proc translateInfix(m: BModule; n: PNode): JsonNode =
   if n.len < 3:
-    return %* "# unsupported infix"
+    localError(m.config, n.info, "malformed infix expression (expected 3 children, got " & $n.len & ")")
+    return newJNull()
 
   let left = translateExpr(m, n[1])
   let right = translateExpr(m, n[2])
@@ -483,7 +486,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       varNode(name)
   of nkSym:
     if n.sym.isNil:
-      %* "# sym"
+      localError(m.config, n.info, "symbol node with nil symbol information")
+      newJNull()
     else:
       let name = n.sym.name.s
       if name == "true":
@@ -544,13 +548,15 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       return translateExpr(m, expr)
     else:
       # Malformed pragma expression
-      return %* "# unsupported pragma expr"
+      localError(m.config, n.info, "malformed pragma expression")
+      return newJNull()
   of nkIfExpr, nkIfStmt:
     translateIfExpr(m, n)
   of nkPar:
     # Tuples: (a, b) → {:{},[],[a,b]} or single element (a) → a (grouping)
     if n.len == 0:
-      %* "# empty tuple"
+      localError(m.config, n.info, "empty tuple not supported (use explicit tuple type or nil)")
+      newJNull()
     elif n.len == 1:
       # Single element in parens is just grouping
       translateExpr(m, n[0])
@@ -561,12 +567,18 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         elements.add(translateExpr(m, child))
       elixirTuple(atom("{}"), metaFromNode(m, n), list(elements))
   of nkExprEqExpr, nkHiddenAddr, nkHiddenDeref:
-    if n.len > 0: translateExpr(m, n[0]) else: %* "# empty"
+    if n.len > 0:
+      translateExpr(m, n[0])
+    else:
+      localError(m.config, n.info, "malformed expression node (empty " & $n.kind & ")")
+      newJNull()
   of nkHiddenStdConv, nkHiddenCallConv, nkHiddenSubConv:
     # Hidden conversions: child[0] is calling convention/type, child[1] is the actual expression
     if n.len > 1: translateExpr(m, n[1])
     elif n.len > 0: translateExpr(m, n[0])
-    else: %* "# empty"
+    else:
+      localError(m.config, n.info, "malformed conversion node (empty " & $n.kind & ")")
+      newJNull()
   of nkBracket:
     # List literal [a, b, c] → Elixir list
     var elements: seq[JsonNode] = @[]
@@ -613,7 +625,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       let fieldAtom = atom(fieldName)
       remoteCallNode(m, "Map", "get", @[obj, fieldAtom], n)
     else:
-      %* "# invalid dot expression"
+      localError(m.config, n.info, "malformed dot expression (invalid structure)")
+      newJNull()
   of nkEmpty:
     # Empty nodes should return null instead of unsupported warnings
     newJNull()
@@ -629,9 +642,11 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         let varName = target.sym.name.s
         opNode(m, "=", @[varNode(varName), value], n)
       else:
-        %* "# unsupported nkAsgn target"
+        localError(m.config, n.info, "unsupported assignment target (must be a simple variable)")
+        newJNull()
     else:
-      %* "# invalid nkAsgn"
+      localError(m.config, n.info, "malformed assignment expression (expected 2 children, got " & $n.len & ")")
+      newJNull()
   of nkStmtListExpr:
     # Statement list as expression (e.g., in let bindings or block returns)
     # Last statement is the value, earlier statements are for side effects
@@ -662,7 +677,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
       # Elixir range: {:.., [], [start, end]}
       elixirTuple(atom(".."), metaFromNode(m, n), list(@[start, endVal]))
     else:
-      %* "# invalid range"
+      localError(m.config, n.info, "malformed range expression (expected 2 children, got " & $n.len & ")")
+      newJNull()
   of nkBracketExpr:
     # Array/list/tuple indexing: arr[index]
     # Tuples use elem(tuple, index), lists use Enum.at(list, index)
@@ -677,7 +693,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         # List/array indexing: Enum.at(list, index)
         remoteCallNode(m, "Enum", "at", @[container, index], n)
     else:
-      %* "# invalid bracket expression"
+      localError(m.config, n.info, "malformed bracket expression (expected at least 2 children, got " & $n.len & ")")
+      newJNull()
   of nkPrefix:
     # Prefix operators: not x → not(x)
     if n.len >= 2:
@@ -696,9 +713,11 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
           # Other prefix operators
           opNode(m, opName, @[operand], n)
       else:
-        %* "# unsupported prefix operator"
+        localError(m.config, n.info, "unsupported prefix operator (missing symbol information)")
+        newJNull()
     else:
-      %* "# invalid prefix expression"
+      localError(m.config, n.info, "malformed prefix expression (expected at least 2 children)")
+      newJNull()
   of nkLambda, nkDo:
     # Anonymous function: proc(x: int): int = x + 1 → fn x -> x + 1 end
     let paramsNode = n[paramsPos]
@@ -718,7 +737,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
                             list(@[list(params), bodyExpr]))
     elixirTuple(atom("fn"), metaFromNode(m, n), list(@[arrow]))
   else:
-    %* ("# unsupported " & $n.kind)
+    localError(m.config, n.info, "unsupported expression node kind: " & $n.kind)
+    newJNull()
 
 # ---------------------------------------------------------------------------
 # Statement translation
@@ -726,7 +746,7 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
 proc translateAssignment(m: BModule; stmt: PNode): seq[JsonNode] =
   result = @[]
   if stmt.len < 2:
-    result.add(%* ("# unsupported assignment: " & $stmt.kind))
+    localError(m.config, stmt.info, "malformed assignment (expected at least 2 children, got " & $stmt.len & ")")
     return
 
   let target = stmt[0]
@@ -805,7 +825,8 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
   of nkCaseStmt:
     # Case statement: case x of 0: ... of 1: ... else: ...
     if node.len < 2:
-      result.add(%* "# unsupported case")
+      localError(m.config, node.info, "malformed case statement (expected at least 2 children, got " & $node.len & ")")
+      return
     else:
       let selector = translateExpr(m, node[0])
       var clauses: seq[JsonNode] = @[]
@@ -843,7 +864,8 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     # While loops are NOT SUPPORTED in Elixir backend
     # Reason: Elixir's immutable variables break closure-based while loop helpers
     # Workaround: Use recursion or Enum functions instead
-    result.add(%* "# ERROR: while loops not supported - use recursion or Enum functions")
+    localError(m.config, node.info, "while loops not supported in Elixir backend - use recursion or Enum functions instead")
+    return
   of nkImportStmt:
     # Import statement: import Elixir.File, Elixir.Jason
     # Extract module names and add to importedModules for alias generation
@@ -888,7 +910,8 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
       if isReceiveBlock and stmt.kind == nkCaseStmt:
         # Generate Elixir receive block instead of case
         if stmt.len < 2:
-          result.add(%* "# invalid receive block")
+          localError(m.config, stmt.info, "malformed receive block (expected at least 2 children, got " & $stmt.len & ")")
+          return
         else:
           # Skip the discriminator (RECEIVE_MARKER), go straight to branches
           var clauses: seq[JsonNode] = @[]
@@ -933,7 +956,8 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
         # Not a receive block, just translate the inner statement
         result.addAll(translateStmt(m, stmt))
     else:
-      result.add(%* "# malformed pragma block")
+      localError(m.config, node.info, "malformed pragma block (expected at least 2 children, got " & $node.len & ")")
+      return
   of nkCommentStmt:
     discard
   of nkInfix:
@@ -951,9 +975,11 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
         else:
           result.add(opNode(m, opName, @[operand], node))
       else:
-        result.add(%* "# unsupported prefix operator")
+        localError(m.config, node.info, "unsupported prefix operator (missing symbol information)")
+        return
     else:
-      result.add(%* "# invalid prefix expression")
+      localError(m.config, node.info, "malformed prefix expression (expected at least 2 children)")
+      return
   of nkTryStmt:
     # Try/except/finally → try/rescue/after
     # node[0]: try body
@@ -1011,7 +1037,8 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
     # Literal expressions in statement context
     result.add(translateExpr(m, node))
   else:
-    result.add(%* ("# unsupported node: " & $node.kind))
+    localError(m.config, node.info, "unsupported statement node kind: " & $node.kind)
+    return
 
 # ---------------------------------------------------------------------------
 # Procedure generation
@@ -1560,7 +1587,10 @@ proc finalElixirCodeGen*(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
     m.forms.add(defNode)
 
   if m.forms.len == 0:
-    m.forms.add(%* "# module has no translated procedures")
+    # Module has no translated procedures - emit warning but don't generate artifact
+    # This can happen with empty modules or modules with only imports/types
+    globalError(m.config, m.module.info, "module has no translated procedures - nothing to generate")
+    return n
 
   m.writeArtifact()
   result = n
