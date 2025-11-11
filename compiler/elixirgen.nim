@@ -779,7 +779,14 @@ proc translateStmt(m: BModule; node: PNode): seq[JsonNode] =
         let valueNode = child[^1]
         if nameNode.kind == nkSym and not nameNode.sym.isNil:
           let varName = nameNode.sym.name.s
-          let value = translateExpr(m, valueNode)
+          # Special handling for uninitialized seq variables
+          # If value is nkEmpty and type is seq[T], generate [] instead of nil
+          let value =
+            if valueNode.kind == nkEmpty and not nameNode.sym.typ.isNil and
+               nameNode.sym.typ.kind == tySequence:
+              %* [] # Generate empty list for uninitialized seq
+            else:
+              translateExpr(m, valueNode)
           result.add(opNode(m, "=", @[varNode(varName), value], child))
   of nkReturnStmt:
     # Explicit return statement
