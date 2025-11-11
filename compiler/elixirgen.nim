@@ -603,7 +603,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
           if fieldNode[0].kind == nkSym and not fieldNode[0].sym.isNil:
             fieldNode[0].sym.name.s
           else:
-            "field"
+            localError(m.config, fieldNode[0].info, "object construction field missing symbol information (cannot determine field name)")
+            "unknown_field"  # Fallback to allow continued error checking
         let fieldValue = translateExpr(m, fieldNode[1])
         pairs.add((fieldName, fieldValue))
     # Generate %{...} map structure
@@ -621,7 +622,8 @@ proc translateExpr(m: BModule; n: PNode): JsonNode =
         if n[1].kind == nkSym and not n[1].sym.isNil:
           n[1].sym.name.s
         else:
-          "field"
+          localError(m.config, n[1].info, "field access missing symbol information (cannot determine field name - possible typo?)")
+          "unknown_field"  # Fallback to allow continued error checking
       let fieldAtom = atom(fieldName)
       remoteCallNode(m, "Map", "get", @[obj, fieldAtom], n)
     else:
