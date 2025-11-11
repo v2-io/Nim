@@ -207,7 +207,12 @@ proc translateIfExpr(m: BModule; node: PNode): JsonNode =
   buildIfChain(branches, 0)
 
 proc remoteCallNode(m: BModule; moduleName, funcName: string; args: seq[JsonNode]; origin: PNode): JsonNode =
-  let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(@[atom(moduleName)]))
+  # Split multi-segment module names (e.g., "Task.Supervisor" → [:Task, :Supervisor])
+  let segments = moduleName.split('.')
+  var moduleAtoms: seq[JsonNode] = @[]
+  for seg in segments:
+    moduleAtoms.add(atom(seg))
+  let aliasNode = elixirTuple(atom("__aliases__"), emptyKeyword(), list(moduleAtoms))
   let dotNode = elixirTuple(atom("."), emptyKeyword(), list(@[aliasNode, atom(funcName)]))
   elixirTuple(dotNode, metaFromNode(m, origin), list(args))
 
